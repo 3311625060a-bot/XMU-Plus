@@ -62,6 +62,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontFamily
@@ -71,6 +72,7 @@ import androidx.compose.ui.unit.sp
 import cn.edu.xmu.plus.data.CourseDetailUiState
 import cn.edu.xmu.plus.data.CourseItem
 import cn.edu.xmu.plus.data.DemoData
+import cn.edu.xmu.plus.data.RollcallHistoryUiState
 import cn.edu.xmu.plus.data.XmuDashboardState
 import cn.edu.xmu.plus.ui.components.AmbientGlowBackground
 import cn.edu.xmu.plus.ui.components.FrostedGlassCard
@@ -83,9 +85,11 @@ import cn.edu.xmu.plus.ui.components.bounceClickable
 fun CoursesScreen(
     dashboardState: XmuDashboardState,
     courseDetails: Map<Long, CourseDetailUiState>,
+    rollcallHistory: RollcallHistoryUiState,
     onSelectSemester: (Long?) -> Unit,
     onRefreshAll: () -> Unit,
     onLoadCourseDetail: (CourseItem) -> Unit,
+    onLoadRollcallHistory: (Boolean) -> Unit,
     onOpenAttachment: (Long, String) -> Unit,
     onOpenHomeworkDetail: (Long, String) -> Unit,
     isTabletLayout: Boolean = false,
@@ -250,7 +254,9 @@ fun CoursesScreen(
                     } else {
                         LazyColumn(
                             state = listState,
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clipToBounds(),
                             contentPadding = PaddingValues(
                                 start = 20.dp,
                                 end = 20.dp,
@@ -265,7 +271,6 @@ fun CoursesScreen(
                                     shape = RoundedCornerShape(20.dp),
                                     isSelected = isTabletLayout && activeTabletCourse?.id == course.id,
                                     onClick = { selectedCourse = course },
-                                    modifier = Modifier.animateItem(),
                                 )
                             }
                         }
@@ -287,8 +292,10 @@ fun CoursesScreen(
                         CourseDetailTabsContent(
                             course = activeTabletCourse,
                             detailState = courseDetails[activeTabletCourse.id],
+                            rollcallHistory = rollcallHistory,
                             isDemoMode = dashboardState.isDemoMode,
                             onLoadDetail = { onLoadCourseDetail(activeTabletCourse) },
+                            onLoadRollcallHistory = onLoadRollcallHistory,
                             onOpenAttachment = onOpenAttachment,
                             onOpenHomework = { hwId -> onOpenHomeworkDetail(hwId, "course") },
                             onClose = null,
@@ -315,8 +322,10 @@ fun CoursesScreen(
             CoursePreviewSheet(
                 course = course,
                 detailState = courseDetails[course.id],
+                rollcallHistory = rollcallHistory,
                 isDemoMode = dashboardState.isDemoMode,
                 onLoadDetail = { onLoadCourseDetail(course) },
+                onLoadRollcallHistory = onLoadRollcallHistory,
                 onOpenAttachment = onOpenAttachment,
                 onDismiss = { selectedCourse = null },
                 onOpenHomework = { hwId ->
@@ -446,8 +455,10 @@ private fun CourseListCard(
 private fun CoursePreviewSheet(
     course: CourseItem,
     detailState: CourseDetailUiState?,
+    rollcallHistory: RollcallHistoryUiState,
     isDemoMode: Boolean,
     onLoadDetail: () -> Unit,
+    onLoadRollcallHistory: (Boolean) -> Unit,
     onOpenAttachment: (Long, String) -> Unit,
     onDismiss: () -> Unit,
     onOpenHomework: (Long) -> Unit,
@@ -464,8 +475,10 @@ private fun CoursePreviewSheet(
         CourseDetailTabsContent(
             course = course,
             detailState = detailState,
+            rollcallHistory = rollcallHistory,
             isDemoMode = isDemoMode,
             onLoadDetail = onLoadDetail,
+            onLoadRollcallHistory = onLoadRollcallHistory,
             onOpenAttachment = onOpenAttachment,
             onOpenHomework = onOpenHomework,
             onClose = onDismiss,
@@ -479,18 +492,25 @@ private fun CoursePreviewSheet(
 private fun CourseDetailTabsContent(
     course: CourseItem,
     detailState: CourseDetailUiState?,
+    rollcallHistory: RollcallHistoryUiState,
     isDemoMode: Boolean,
     onLoadDetail: () -> Unit,
+    onLoadRollcallHistory: (Boolean) -> Unit,
     onOpenAttachment: (Long, String) -> Unit,
     onOpenHomework: (Long) -> Unit,
     onClose: (() -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
     var tabIndex by remember(course.id) { mutableIntStateOf(0) }
-    val tabs = listOf("作业", "课件", "公告")
+    val tabs = listOf("作业", "课件", "公告", "考勤")
 
     LaunchedEffect(course.id) {
         onLoadDetail()
+    }
+    LaunchedEffect(course.id, tabIndex) {
+        if (tabIndex == 3) {
+            onLoadRollcallHistory(false)
+        }
     }
 
     val courseHomeworks = detailState?.homeworks
@@ -499,6 +519,9 @@ private fun CourseDetailTabsContent(
         ?: if (isDemoMode) DemoData.coursewares.filter { it.courseId == course.id } else emptyList()
     val courseBulletins = detailState?.bulletins
         ?: if (isDemoMode) DemoData.bulletins.filter { it.courseId == course.id } else emptyList()
+    val courseRollcalls = remember(rollcallHistory.records, course.id) {
+        rollcallHistory.records.filter { it.courseId == course.id }
+    }
 
     Column(
         modifier = modifier
@@ -587,8 +610,8 @@ private fun CourseDetailTabsContent(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .bounceClickable {
-                                    if (cw.uploadId > 0L) {
-                                        onOpenAttachment(cw.uploadId, cw.title)
+                                    if (cw.uploadId > 0L || isDemoMode) {
+                                        onOpenAttachment(if (cw.uploadId > 0L) cw.uploadId else cw.id, cw.title)
                                     }
                                 },
                         ) {
@@ -615,7 +638,7 @@ private fun CourseDetailTabsContent(
                     }
                 }
 
-                else -> if (courseBulletins.isEmpty()) {
+                2 -> if (courseBulletins.isEmpty()) {
                     EmptyTabHint(if (detailState?.isLoading == true) "正在加载公告…" else "该课程暂无新公告")
                 } else {
                     courseBulletins.forEach { b ->
@@ -643,6 +666,14 @@ private fun CourseDetailTabsContent(
                                 )
                             }
                         }
+                    }
+                }
+
+                else -> if (courseRollcalls.isEmpty()) {
+                    EmptyTabHint(if (rollcallHistory.isLoading) "正在同步签到记录…" else "该课程暂无点名记录")
+                } else {
+                    courseRollcalls.forEach { rc ->
+                        RollcallRecordCard(record = rc, showCourseName = false)
                     }
                 }
             }

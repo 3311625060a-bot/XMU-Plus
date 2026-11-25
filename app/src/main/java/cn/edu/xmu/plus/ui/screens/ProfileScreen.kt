@@ -25,6 +25,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.FactCheck
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Badge
 import androidx.compose.material.icons.rounded.Info
@@ -84,6 +85,7 @@ fun ProfileScreen(
     onOpenCourses: () -> Unit,
     onOpenPendingHomework: () -> Unit,
     onOpenGradedHomework: () -> Unit,
+    onOpenRollcallHistory: () -> Unit,
     onOpenSettings: (String) -> Unit,
 ) {
     var showLogoutDialog by remember { mutableStateOf(false) }
@@ -300,7 +302,7 @@ fun ProfileScreen(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Column {
-                        val settingsShape = groupedCardShape(0, 3)
+                        val settingsShape = groupedCardShape(0, 4)
                         val generalSharedModifier = Modifier.optionalSharedBounds(
                             sharedTransitionScope = sharedTransitionScope,
                             animatedVisibilityScope = animatedVisibilityScope,
@@ -322,6 +324,15 @@ fun ProfileScreen(
                                 )
                             },
                             onClick = { onOpenSettings("general") },
+                        )
+
+                        FrostedHairlineDivider(startIndent = 64.dp)
+
+                        ProfileMenuRow(
+                            icon = Icons.AutoMirrored.Rounded.FactCheck,
+                            title = "签到记录查询",
+                            subtitle = "查看各门课程出勤率、历史点名与请假记录",
+                            onClick = onOpenRollcallHistory,
                         )
 
                         FrostedHairlineDivider(startIndent = 64.dp)

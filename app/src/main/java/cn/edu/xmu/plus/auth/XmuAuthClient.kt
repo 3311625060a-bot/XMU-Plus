@@ -447,6 +447,30 @@ class XmuAuthClient(
         }
     }
 
+    fun syncCookiesToWebView() {
+        val snapshot = sessionStore.currentSessionSnapshot() ?: return
+        if (snapshot.sessionId.isBlank()) return
+        runCatching {
+            val cm = CookieManager.getInstance()
+            cm.setAcceptCookie(true)
+            val domains = listOf(
+                LNT_BASE_URL,
+                "https://c-mobile.xmu.edu.cn",
+            )
+            snapshot.cookies.forEach { cookie ->
+                if (cookie.name.isNotBlank() && cookie.value.isNotBlank()) {
+                    domains.forEach { origin ->
+                        cm.setCookie(origin, "${cookie.name}=${cookie.value}; path=/; Secure")
+                    }
+                }
+            }
+            domains.forEach { origin ->
+                cm.setCookie(origin, "session=${snapshot.sessionId}; path=/; Secure")
+            }
+            cm.flush()
+        }
+    }
+
     private fun extractCasErrorTip(html: String): String? {
         val tipRegex = Regex("""id\s*=\s*["']showErrorTip["'][^>]*>([\s\S]*?)</""")
         val raw = tipRegex.find(html)?.groupValues?.getOrNull(1) ?: return null

@@ -32,14 +32,16 @@
 - **安全可靠的统一身份认证**
   - 支持厦门大学 CAS 原生 AES 加密直连登录，使用 **Android Keystore AES-256-GCM** 硬件加密本地保存账号凭证与会话。
   - 遇到风控滑块或短信验证时自动切出内置安全 WebView 完成验证并同步会话。
-- **双入口快捷课堂签到**
+- **双入口快捷课堂签到与考勤查询**
   - **扫码签到**：集成 CameraX + ML Kit Barcode Scanning 实时识别课堂二维码（兼容畅课 JSON 与 `/j?p=` 跳转链接），支持手电筒、相册扫码与手动粘贴。
   - **密码签到**：4 位数字口令专属大键盘，支持错误震动与反馈提示；首页实时捕获正在进行的课堂点名。
-- **全流程作业中心**
+  - **签到记录查询**：聚合各门课程的历史点名记录，统计出勤率与已签到 / 迟到请假 / 缺勤次数，支持按状态与课程筛选。
+- **全流程作业中心与内置文档/图片浏览器**
   - 支持「全部 / 待提交 / 已提交 / 已批改」横向滑动与点击切换，统一卡片视觉风格与左侧窄状态竖线指示。
-  - 查看作业要求、参考附件预览/下载，支持文档与相册图片多附件上传提交、修改重交，展示批改得分、评语与查重率。
+  - **轻量化内置图片与文档浏览器**：支持图片双指缩放原图查看、`PdfRenderer` 原生逐页 PDF/转换课件渲染、纯文本代码阅读，以及畅课在线预览与系统应用打开。
+  - 查看作业要求、参考附件与提交记录，支持文档与相册图片多附件上传提交、修改重交，展示批改得分、评语与查重率。
 - **课程空间与跨课程全局搜索**
-  - 按学期切换查看课程、课件与公告；支持一键索引全部课程资源并跨课程检索课程、作业、课件与公告。
+  - 按学期切换查看课程作业、课件、公告与课程考勤；支持一键索引全部课程资源并跨课程检索课程、作业、课件与公告。
   - 内置离线 SQLite 缓存，无网或弱网环境下可快速浏览已缓存列表。
 - **桌面小组件与 DDL 到期提醒**
   - **Jetpack Glance 桌面微件**：直接在手机桌面查看即将截止的待交作业与倒计时。
@@ -120,7 +122,7 @@ app/src/main/java/cn/edu/xmu/plus/
     ├── XmuPlusApp.kt                # 根导航容器与自适应平板/手机外壳
     ├── theme/                       # 纸白/曜石黑双色板、字体排版与圆角规范
     ├── components/                  # NavigationDock / SegmentedControls / CheckInSheets / FrostedGlassUi
-    └── screens/                     # Home / Homework / HomeworkDetail / Courses / Profile / Settings / Search / QrScanner / Login
+    └── screens/                     # Home / Homework / HomeworkDetail / Courses / RollcallHistory / InAppViewer / Profile / Settings / Search / QrScanner / Login
 ```
 
 ---

@@ -1,9 +1,14 @@
 package cn.edu.xmu.plus.ui.screens
 
 import android.net.Uri
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionScope
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -39,8 +44,6 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,6 +51,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -92,21 +96,6 @@ fun HomeworkScreen(
     onSubmitHomework: suspend (Long, String, List<PickedLocalFile>, Long?, (Float, String) -> Unit) -> Result<Unit>,
 ) {
     val pullState = rememberPullToRefreshState()
-    val listState = rememberLazyListState()
-    LaunchedEffect(selectedFilter) {
-        if (listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0) {
-            listState.scrollToItem(0)
-        }
-    }
-    val scrollOffsetPx by remember {
-        derivedStateOf {
-            if (listState.firstVisibleItemIndex == 0) {
-                listState.firstVisibleItemScrollOffset.toFloat()
-            } else {
-                550f
-            }
-        }
-    }
 
     val filtered = remember(selectedFilter, dashboardState.homeworks) {
         when (selectedFilter) {
@@ -124,7 +113,7 @@ fun HomeworkScreen(
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        AmbientGlowBackground(scrollOffsetPx = { scrollOffsetPx })
+        AmbientGlowBackground(scrollOffsetPx = { 0f })
 
         Row(modifier = Modifier.fillMaxSize()) {
             PullToRefreshBox(
@@ -181,58 +170,81 @@ fun HomeworkScreen(
 
                     Spacer(modifier = Modifier.height(14.dp))
 
-                    if (filtered.isEmpty()) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(horizontal = 24.dp),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(
-                                text = if (dashboardState.isRefreshing) "正在同步课程作业…" else "该分类下暂无作业",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                    AnimatedContent(
+                        targetState = selectedFilter,
+                        transitionSpec = {
+                            fadeIn(tween(110)) togetherWith fadeOut(tween(80))
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .clipToBounds(),
+                        label = "hwFilterTab",
+                    ) { tabFilter ->
+                        val tabFiltered = remember(tabFilter, dashboardState.homeworks) {
+                            when (tabFilter) {
+                                HomeworkFilter.ALL -> dashboardState.homeworks
+                                HomeworkFilter.PENDING -> dashboardState.homeworks.filter { it.status == HomeworkStatus.PENDING }
+                                HomeworkFilter.SUBMITTED -> dashboardState.homeworks.filter { it.status == HomeworkStatus.SUBMITTED }
+                                HomeworkFilter.GRADED -> dashboardState.homeworks.filter { it.status == HomeworkStatus.GRADED }
+                            }
                         }
-                    } else {
-                        LazyColumn(
-                            state = listState,
-                            modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(
-                                start = 20.dp,
-                                end = 20.dp,
-                                top = 2.dp,
-                                bottom = if (isTabletLayout) 28.dp else 106.dp,
-                            ),
-                            verticalArrangement = Arrangement.spacedBy(10.dp),
-                        ) {
-                            itemsIndexed(filtered, key = { _, item -> item.id }) { _, item ->
-                                val shape = RoundedCornerShape(20.dp)
-                                val isSelected = isTabletLayout && activeDetailItem?.id == item.id
-                                val sharedModifier = Modifier
-                                    .animateItem()
-                                    .let { mod ->
-                                        if (isTabletLayout) mod
-                                        else mod.optionalSharedBounds(
+                        val tabListState = rememberLazyListState()
+
+                        if (tabFiltered.isEmpty()) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(horizontal = 24.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    text = if (dashboardState.isRefreshing) "正在同步课程作业…" else "该分类下暂无作业",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        } else {
+                            LazyColumn(
+                                state = tabListState,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .clipToBounds(),
+                                contentPadding = PaddingValues(
+                                    start = 20.dp,
+                                    end = 20.dp,
+                                    top = 2.dp,
+                                    bottom = if (isTabletLayout) 28.dp else 106.dp,
+                                ),
+                                verticalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                itemsIndexed(tabFiltered, key = { _, item -> item.id }) { _, item ->
+                                    val shape = RoundedCornerShape(20.dp)
+                                    val isSelected = isTabletLayout && activeDetailItem?.id == item.id
+                                    val sharedModifier = if (isTabletLayout) {
+                                        Modifier
+                                    } else {
+                                        Modifier.optionalSharedBounds(
                                             sharedTransitionScope = sharedTransitionScope,
                                             animatedVisibilityScope = animatedVisibilityScope,
                                             key = "hw_card_list_${item.id}",
                                             clipShape = shape,
                                         )
                                     }
-                                HomeworkListCard(
-                                    item = item,
-                                    shape = shape,
-                                    isSelected = isSelected,
-                                    onClick = {
-                                        if (isTabletLayout) {
-                                            tabletSelectedId = item.id
-                                        } else {
-                                            onOpenHomeworkDetail(item.id, "list")
-                                        }
-                                    },
-                                    modifier = sharedModifier,
-                                )
+                                    HomeworkListCard(
+                                        item = item,
+                                        shape = shape,
+                                        isSelected = isSelected,
+                                        onClick = {
+                                            if (isTabletLayout) {
+                                                tabletSelectedId = item.id
+                                            } else {
+                                                onOpenHomeworkDetail(item.id, "list")
+                                            }
+                                        },
+                                        modifier = sharedModifier,
+                                    )
+                                }
                             }
                         }
                     }

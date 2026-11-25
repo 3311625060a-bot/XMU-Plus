@@ -333,7 +333,7 @@ fun HomeworkDetailPane(
                         } else {
                             homework.attachments.forEach { fileName ->
                                 AssistChip(
-                                    onClick = {},
+                                    onClick = { onOpenAttachment(0L, fileName) },
                                     label = { Text(fileName) },
                                     leadingIcon = {
                                         Icon(

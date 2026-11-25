@@ -26,6 +26,11 @@ data class CourseDetailCacheSnapshot(
 )
 
 @Serializable
+data class RollcallHistoryCacheSnapshot(
+    val records: List<RollcallHistoryItem> = emptyList(),
+)
+
+@Serializable
 data class WidgetDdlItem(
     val id: Long,
     val courseName: String,

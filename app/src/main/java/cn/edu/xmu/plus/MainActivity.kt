@@ -1,10 +1,7 @@
 package cn.edu.xmu.plus
 
-import android.content.Intent
 import android.graphics.Color
-import android.net.Uri
 import android.os.Bundle
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
@@ -42,6 +39,7 @@ class MainActivity : ComponentActivity() {
             val dashboardState by mainViewModel.uiState.collectAsStateWithLifecycle()
             val courseDetails by mainViewModel.courseDetails.collectAsStateWithLifecycle()
             val homeworkDetails by mainViewModel.homeworkDetails.collectAsStateWithLifecycle()
+            val rollcallHistory by mainViewModel.rollcallHistory.collectAsStateWithLifecycle()
             val isIndexingSearch by mainViewModel.isIndexingSearch.collectAsStateWithLifecycle()
             val scope = rememberCoroutineScope()
 
@@ -100,9 +98,11 @@ class MainActivity : ComponentActivity() {
                     dashboardState = dashboardState,
                     courseDetails = courseDetails,
                     homeworkDetails = homeworkDetails,
+                    rollcallHistory = rollcallHistory,
                     isIndexingSearch = isIndexingSearch,
                     onRefreshAll = mainViewModel::refreshAll,
                     onRefreshRollcalls = mainViewModel::refreshRollcalls,
+                    onRefreshRollcallHistory = mainViewModel::loadAllRollcallHistory,
                     onSelectSemester = mainViewModel::selectSemester,
                     onLoadCourseDetail = mainViewModel::loadCourseDetail,
                     onLoadHomeworkDetail = mainViewModel::loadHomeworkDetail,
@@ -120,26 +120,9 @@ class MainActivity : ComponentActivity() {
                             onProgress = onProg,
                         )
                     },
-                    onOpenAttachment = { uploadId, _ ->
-                        scope.launch {
-                            mainViewModel.resolveAttachmentUrl(uploadId).fold(
-                                onSuccess = { url ->
-                                    runCatching {
-                                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-                                    }.onFailure {
-                                        Toast.makeText(this@MainActivity, "无法打开外部查看器", Toast.LENGTH_SHORT).show()
-                                    }
-                                },
-                                onFailure = { err ->
-                                    Toast.makeText(
-                                        this@MainActivity,
-                                        err.message ?: "获取文件链接失败",
-                                        Toast.LENGTH_SHORT,
-                                    ).show()
-                                },
-                            )
-                        }
-                    },
+                    onResolveAttachmentPreview = mainViewModel::resolveAttachmentPreview,
+                    onDownloadPreviewFile = mainViewModel::downloadPreviewFile,
+                    onSyncWebViewCookies = mainViewModel::syncCookiesToWebView,
                     onSelectAccentTone = { tone ->
                         scope.launch { repo.setAccentTone(tone) }
                     },

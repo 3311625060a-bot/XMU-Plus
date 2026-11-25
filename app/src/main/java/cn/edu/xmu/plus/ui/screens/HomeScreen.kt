@@ -36,6 +36,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowForward
+import androidx.compose.material.icons.automirrored.rounded.FactCheck
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.DarkMode
@@ -101,6 +102,7 @@ fun HomeScreen(
     onToggleDarkMode: (currentlyDark: Boolean) -> Unit,
     onOpenQrCheckIn: () -> Unit,
     onOpenPasscodeCheckIn: (ActiveRollcall?) -> Unit,
+    onOpenRollcallHistory: () -> Unit,
     onOpenHomeworkDetail: (Long, String) -> Unit,
     onOpenPendingHomework: () -> Unit,
     onOpenAllHomework: () -> Unit,
@@ -202,11 +204,64 @@ fun HomeScreen(
 
                 // Split Large Check-In Action Cards
                 item {
-                    CheckInActionCardsRow(
-                        onOpenQrCheckIn = onOpenQrCheckIn,
-                        onOpenPasscodeCheckIn = { onOpenPasscodeCheckIn(activeRollcall) },
+                    Column(
                         modifier = Modifier.padding(horizontal = 20.dp),
-                    )
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        CheckInActionCardsRow(
+                            onOpenQrCheckIn = onOpenQrCheckIn,
+                            onOpenPasscodeCheckIn = { onOpenPasscodeCheckIn(activeRollcall) },
+                        )
+                        FrostedGlassCard(
+                            shape = RoundedCornerShape(16.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .bounceClickable(pressedScale = 0.99f, onClick = onOpenRollcallHistory),
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 11.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(30.dp)
+                                        .clip(RoundedCornerShape(9.dp))
+                                        .background(MaterialTheme.colorScheme.secondaryContainer),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Rounded.FactCheck,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.secondary,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(
+                                    text = "签到记录查询",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "各科出勤率与点名明细",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
+                        }
+                    }
                 }
 
                 // Monospace Metric Cards

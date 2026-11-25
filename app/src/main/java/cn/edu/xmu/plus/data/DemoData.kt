@@ -122,6 +122,45 @@ data class BulletinItem(
     val isUnread: Boolean,
 )
 
+@Serializable
+enum class RollcallRecordStatus(val label: String) {
+    ON_CALL("已签到"),
+    LATE("迟到"),
+    EARLY_LEAVE("早退"),
+    LATE_AND_EARLY("迟到且早退"),
+    ON_LEAVE("请假"),
+    ABSENT("缺勤"),
+    IN_PROGRESS("进行中"),
+    UNKNOWN("未记录"),
+}
+
+@Serializable
+@Immutable
+data class RollcallHistoryItem(
+    val id: Long,
+    val courseId: Long,
+    val courseName: String,
+    val title: String,
+    val rollcallTimeText: String,
+    val rollcallTimeIso: String? = null,
+    val rollcallMethod: String,
+    val rollcallStatus: String,
+    val studentStatus: RollcallRecordStatus,
+    val detailNote: String = "",
+)
+
+@Immutable
+data class AttachmentPreviewInfo(
+    val uploadId: Long,
+    val fileName: String,
+    val sizeBytes: Long = 0L,
+    val fileType: String = "",
+    val onlinePreviewUrl: String? = null,
+    val pdfPreviewUrl: String? = null,
+    val directDownloadUrl: String? = null,
+    val aliyunOfficeTokenJson: String? = null,
+)
+
 object DemoData {
     val activeRollcalls = listOf(
         ActiveRollcall(
@@ -304,6 +343,77 @@ object DemoData {
             summary = "Please confirm your 5-minute lightning talk topic before next Wednesday.",
             publishedAt = "3 天前",
             isUnread = false,
+        ),
+    )
+
+    val rollcallHistory = listOf(
+        RollcallHistoryItem(
+            id = 90214L,
+            courseId = 107546L,
+            courseName = "数据结构与算法",
+            title = "第 11 周周二随堂点名",
+            rollcallTimeText = "今天 10:15",
+            rollcallTimeIso = "2026-11-25T10:15:00Z",
+            rollcallMethod = "数字口令",
+            rollcallStatus = "in_progress",
+            studentStatus = RollcallRecordStatus.IN_PROGRESS,
+        ),
+        RollcallHistoryItem(
+            id = 90188L,
+            courseId = 107812L,
+            courseName = "操作系统原理",
+            title = "第 11 周周一考勤",
+            rollcallTimeText = "昨天 14:05",
+            rollcallTimeIso = "2026-11-24T14:05:00Z",
+            rollcallMethod = "二维码签到",
+            rollcallStatus = "finished",
+            studentStatus = RollcallRecordStatus.ON_CALL,
+        ),
+        RollcallHistoryItem(
+            id = 90142L,
+            courseId = 107546L,
+            courseName = "数据结构与算法",
+            title = "第 10 周周四实验课点名",
+            rollcallTimeText = "11 月 21 日 08:05",
+            rollcallTimeIso = "2026-11-21T08:05:00Z",
+            rollcallMethod = "二维码签到",
+            rollcallStatus = "finished",
+            studentStatus = RollcallRecordStatus.ON_CALL,
+        ),
+        RollcallHistoryItem(
+            id = 90101L,
+            courseId = 107420L,
+            courseName = "概率论与数理统计",
+            title = "第 10 周周三早课点名",
+            rollcallTimeText = "11 月 20 日 08:00",
+            rollcallTimeIso = "2026-11-20T08:00:00Z",
+            rollcallMethod = "雷达签到",
+            rollcallStatus = "finished",
+            studentStatus = RollcallRecordStatus.LATE,
+            detailNote = "迟到 3 分钟",
+        ),
+        RollcallHistoryItem(
+            id = 90077L,
+            courseId = 107903L,
+            courseName = "人工智能导论",
+            title = "第 9 周课堂点名",
+            rollcallTimeText = "11 月 13 日 16:20",
+            rollcallTimeIso = "2026-11-13T16:20:00Z",
+            rollcallMethod = "数字口令",
+            rollcallStatus = "finished",
+            studentStatus = RollcallRecordStatus.ON_LEAVE,
+            detailNote = "公假",
+        ),
+        RollcallHistoryItem(
+            id = 90025L,
+            courseId = 107388L,
+            courseName = "学术英语写作进阶",
+            title = "第 8 周随堂考勤",
+            rollcallTimeText = "11 月 7 日 14:10",
+            rollcallTimeIso = "2026-11-07T14:10:00Z",
+            rollcallMethod = "教师点名",
+            rollcallStatus = "finished",
+            studentStatus = RollcallRecordStatus.ABSENT,
         ),
     )
 }

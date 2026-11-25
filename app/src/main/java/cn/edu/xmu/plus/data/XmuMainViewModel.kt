@@ -29,6 +29,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -70,10 +71,19 @@ data class HomeworkDetailUiState(
     val errorMessage: String? = null,
 )
 
+@Immutable
+data class RollcallHistoryUiState(
+    val isLoading: Boolean = false,
+    val records: List<RollcallHistoryItem> = DemoData.rollcallHistory,
+    val errorMessage: String? = null,
+    val lastSyncText: String? = null,
+)
+
 class XmuMainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val cacheStore = OfflineCacheStore(application.applicationContext)
 
+    private var authClientRef: XmuAuthClient? = null
     private var api: TronClassApi? = null
     private var sessionStore: SessionStore? = null
     private var currentUserId: Long? = null
@@ -86,6 +96,9 @@ class XmuMainViewModel(application: Application) : AndroidViewModel(application)
 
     private val _homeworkDetails = MutableStateFlow<Map<Long, HomeworkDetailUiState>>(emptyMap())
     val homeworkDetails: StateFlow<Map<Long, HomeworkDetailUiState>> = _homeworkDetails.asStateFlow()
+
+    private val _rollcallHistory = MutableStateFlow(RollcallHistoryUiState())
+    val rollcallHistory: StateFlow<RollcallHistoryUiState> = _rollcallHistory.asStateFlow()
 
     private val _isIndexingSearch = MutableStateFlow(false)
     val isIndexingSearch: StateFlow<Boolean> = _isIndexingSearch.asStateFlow()
@@ -108,6 +121,7 @@ class XmuMainViewModel(application: Application) : AndroidViewModel(application)
         sessionStore: SessionStore,
         authState: AuthState,
     ) {
+        this.authClientRef = authClient
         this.api = TronClassApi(authClient)
         this.sessionStore = sessionStore
 
@@ -130,6 +144,7 @@ class XmuMainViewModel(application: Application) : AndroidViewModel(application)
                 }
                 _courseDetails.value = emptyMap()
                 _homeworkDetails.value = emptyMap()
+                _rollcallHistory.value = RollcallHistoryUiState()
                 _uiState.value = XmuDashboardState(isDemoMode = true)
             }
 
@@ -540,6 +555,121 @@ class XmuMainViewModel(application: Application) : AndroidViewModel(application)
     suspend fun resolveAttachmentUrl(uploadId: Long): Result<String> {
         val currentApi = api ?: return Result.failure(IllegalStateException("请先登录统一身份认证"))
         return currentApi.getUploadDownloadUrl(uploadId)
+    }
+
+    suspend fun resolveAttachmentPreview(uploadId: Long, fileName: String): Result<AttachmentPreviewInfo> {
+        if (_uiState.value.isDemoMode || currentUserId == null || uploadId <= 0L) {
+            return Result.success(
+                AttachmentPreviewInfo(
+                    uploadId = uploadId,
+                    fileName = fileName,
+                    fileType = fileName.substringAfterLast('.', "").uppercase().ifBlank { "FILE" },
+                ),
+            )
+        }
+        val currentApi = api ?: return Result.failure(IllegalStateException("请先登录统一身份认证"))
+        return currentApi.resolveAttachmentPreview(uploadId, fileName)
+    }
+
+    suspend fun downloadPreviewFile(url: String, destFile: File): Result<File> {
+        val currentApi = api ?: return Result.failure(IllegalStateException("请先登录统一身份认证"))
+        return currentApi.downloadUrlToFile(url, destFile)
+    }
+
+    fun syncCookiesToWebView() {
+        authClientRef?.syncCookiesToWebView()
+    }
+
+    fun loadAllRollcallHistory(forceRefresh: Boolean = false) {
+        if (_uiState.value.isDemoMode || currentUserId == null) {
+            _rollcallHistory.value = RollcallHistoryUiState(
+                isLoading = false,
+                records = DemoData.rollcallHistory,
+                lastSyncText = "演示考勤数据",
+            )
+            return
+        }
+        val currentApi = api ?: return
+        val userId = currentUserId ?: return
+        val courses = _uiState.value.courses
+        val semesterKey = _uiState.value.selectedSemesterId ?: 0L
+        val cacheKey = "rollcall_history_${userId}_$semesterKey"
+
+        if (!forceRefresh && _rollcallHistory.value.isLoading) return
+
+        viewModelScope.launch {
+            val cached = cacheStore.getJson(cacheKey, RollcallHistoryCacheSnapshot.serializer())
+            if (cached != null) {
+                _rollcallHistory.update {
+                    it.copy(
+                        isLoading = true,
+                        records = cached.data.records,
+                        errorMessage = null,
+                        lastSyncText = "缓存 · ${formatClock(cached.updatedAtMillis)}",
+                    )
+                }
+            } else {
+                _rollcallHistory.update {
+                    it.copy(
+                        isLoading = true,
+                        records = if (forceRefresh) it.records else emptyList(),
+                        errorMessage = null,
+                    )
+                }
+            }
+
+            try {
+                if (courses.isEmpty()) {
+                    _rollcallHistory.update {
+                        it.copy(isLoading = false, records = emptyList(), lastSyncText = "当前学期暂无课程")
+                    }
+                    return@launch
+                }
+
+                val sem = Semaphore(5)
+                val allRecords = coroutineScope {
+                    courses.map { course ->
+                        async {
+                            sem.withPermit {
+                                currentApi.getCourseRollcallsOfStudent(course.id, course.name, userId)
+                                    .getOrElse { emptyList() }
+                            }
+                        }
+                    }.awaitAll().flatten()
+                }
+
+                val sorted = allRecords
+                    .distinctBy { "${it.courseId}_${it.id}" }
+                    .sortedByDescending {
+                        TimeFormatUtils.parseIsoInstant(it.rollcallTimeIso)?.toEpochMilli() ?: it.id
+                    }
+
+                cacheStore.putJson(
+                    key = cacheKey,
+                    value = RollcallHistoryCacheSnapshot(records = sorted),
+                    serializer = RollcallHistoryCacheSnapshot.serializer(),
+                )
+
+                val syncLabel = "已同步 · ${formatClock(System.currentTimeMillis())}"
+                _rollcallHistory.update {
+                    it.copy(
+                        isLoading = false,
+                        records = sorted,
+                        errorMessage = null,
+                        lastSyncText = syncLabel,
+                    )
+                }
+                DebugLogStore.log("ROLLCALL", "Synced rollcall history count=${sorted.size} across ${courses.size} courses")
+            } catch (e: Exception) {
+                DebugLogStore.log("ROLLCALL", "loadAllRollcallHistory failed: ${e.message}", "ERR")
+                _rollcallHistory.update {
+                    it.copy(
+                        isLoading = false,
+                        errorMessage = e.message ?: "获取签到记录失败",
+                    )
+                }
+            }
+        }
     }
 
     fun resolvePickedFile(context: Context, uri: Uri): PickedLocalFile {

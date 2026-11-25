@@ -4,14 +4,19 @@ import cn.edu.xmu.plus.auth.SessionExpiredException
 import cn.edu.xmu.plus.auth.XmuAuthClient
 import cn.edu.xmu.plus.data.ActiveRollcall
 import cn.edu.xmu.plus.data.AttachmentFile
+import cn.edu.xmu.plus.data.AttachmentPreviewInfo
 import cn.edu.xmu.plus.data.BulletinItem
 import cn.edu.xmu.plus.data.CourseItem
 import cn.edu.xmu.plus.data.CoursewareItem
 import cn.edu.xmu.plus.data.HomeworkItem
 import cn.edu.xmu.plus.data.HomeworkStatus
+import cn.edu.xmu.plus.data.RollcallHistoryItem
+import cn.edu.xmu.plus.data.RollcallRecordStatus
 import cn.edu.xmu.plus.data.SemesterItem
 import cn.edu.xmu.plus.data.TimeFormatUtils
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -29,12 +34,16 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.File
 import java.io.IOException
 import java.net.URLEncoder
+import java.util.concurrent.TimeUnit
 
 sealed interface CheckInApiResult {
     data class Success(val message: String) : CheckInApiResult
@@ -55,6 +64,14 @@ class TronClassApi(
 
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
     private val baseUrl = XmuAuthClient.LNT_BASE_URL
+    private val cdnDownloadClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(45, TimeUnit.SECONDS)
+            .build()
+    }
 
     suspend fun getOngoingRollcalls(): Result<List<ActiveRollcall>> = withContext(Dispatchers.IO) {
         getJson("$baseUrl/api/radar/rollcalls?api_version=1.1.0").map { root ->
@@ -516,6 +533,262 @@ class TronClassApi(
             if (rawUrl.startsWith("http")) rawUrl else "$baseUrl$rawUrl"
         }.recover {
             "$baseUrl/api/uploads/$uploadId/blob?preview=true"
+        }
+    }
+
+    suspend fun resolveAttachmentPreview(
+        uploadId: Long,
+        hintFileName: String,
+    ): Result<AttachmentPreviewInfo> = withContext(Dispatchers.IO) {
+        if (uploadId <= 0L) {
+            return@withContext Result.failure(IllegalArgumentException("无效的文件 ID"))
+        }
+        try {
+            coroutineScope {
+                val infoDeferred = async { getJson("$baseUrl/api/uploads/$uploadId") }
+                val wpsDeferred = async { getJson("$baseUrl/api/uploads/$uploadId/preview/private-wps") }
+                val aliyunDeferred = async { getJson("$baseUrl/api/aliyun-office/token?upload_id=$uploadId&is_mobile=true") }
+                val directDeferred = async { getUploadDownloadUrl(uploadId) }
+
+                val infoObj = infoDeferred.await().getOrNull()?.optObj()
+                val resolvedName = infoObj?.optStr("name")?.ifBlank { null } ?: hintFileName
+                val sizeBytes = infoObj?.optLong("size") ?: 0L
+                val rawType = infoObj?.optStr("type").orEmpty()
+                val refId = infoObj?.optLong("reference_id") ?: 0L
+                val ext = resolvedName.substringAfterLast('.', "").lowercase()
+
+                val isDocCandidate = rawType.equals("document", ignoreCase = true) ||
+                    ext in setOf("pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "wps", "rtf")
+
+                var pdfPreviewUrl: String? = null
+                if (isDocCandidate) {
+                    val docUrlRes = if (refId > 0L) {
+                        getJson("$baseUrl/api/uploads/reference/document/$refId/url?preview=true")
+                    } else {
+                        getJson("$baseUrl/api/uploads/document/$uploadId/url?preview=true")
+                    }
+                    val docRaw = docUrlRes.getOrNull()?.optObj()?.optStr("url").orEmpty()
+                        .ifBlank {
+                            if (refId > 0L) {
+                                getJson("$baseUrl/api/uploads/document/$uploadId/url?preview=true")
+                                    .getOrNull()?.optObj()?.optStr("url").orEmpty()
+                            } else {
+                                ""
+                            }
+                        }
+                    if (docRaw.isNotBlank()) {
+                        pdfPreviewUrl = if (docRaw.startsWith("http")) docRaw else "$baseUrl$docRaw"
+                    }
+                }
+
+                val wpsUrl = wpsDeferred.await().getOrNull()?.optObj()
+                    ?.optStr("preview_url")
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { if (it.startsWith("http")) it else "$baseUrl$it" }
+
+                val aliyunObj = aliyunDeferred.await().getOrNull()?.optObj()
+                val aliyunPreviewUrl = aliyunObj?.let { obj ->
+                    obj.optStr("PreviewURL")
+                        .ifBlank { obj.optStr("WebofficeURL") }
+                        .ifBlank { obj.optStr("WebofficeUrl") }
+                        .ifBlank { obj.optStr("EditURL") }
+                }?.takeIf { it.isNotBlank() }
+                val aliyunAccessToken = aliyunObj?.optStr("AccessToken")?.takeIf { it.isNotBlank() }
+
+                val directUrl = directDeferred.await().getOrNull()
+                    ?: "$baseUrl/api/uploads/$uploadId/blob?preview=true"
+
+                val onlineUrl = wpsUrl ?: aliyunPreviewUrl
+
+                val effectivePdfUrl = when {
+                    ext == "pdf" -> pdfPreviewUrl ?: directUrl
+                    pdfPreviewUrl != null -> pdfPreviewUrl
+                    else -> null
+                }
+
+                val resolvedFileType = rawType.ifBlank {
+                    ext.uppercase().ifBlank { "FILE" }
+                }
+
+                Result.success(
+                    AttachmentPreviewInfo(
+                        uploadId = uploadId,
+                        fileName = resolvedName,
+                        sizeBytes = sizeBytes,
+                        fileType = resolvedFileType,
+                        onlinePreviewUrl = onlineUrl,
+                        pdfPreviewUrl = effectivePdfUrl,
+                        directDownloadUrl = directUrl,
+                        aliyunOfficeTokenJson = if (aliyunAccessToken != null && aliyunPreviewUrl != null) {
+                            aliyunObj.toString()
+                        } else {
+                            null
+                        },
+                    ),
+                )
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun downloadUrlToFile(
+        url: String,
+        destFile: File,
+        maxBytes: Long = 64L * 1024 * 1024,
+    ): Result<File> = withContext(Dispatchers.IO) {
+        try {
+            destFile.parentFile?.mkdirs()
+            var currentUrl = url
+            for (hop in 0 until 6) {
+                val parsed = currentUrl.toHttpUrlOrNull()
+                    ?: return@withContext Result.failure(IOException("无效的文件地址"))
+                val host = parsed.host
+                val isXmuHost = host.equals("xmu.edu.cn", ignoreCase = true) ||
+                    host.endsWith(".xmu.edu.cn", ignoreCase = true)
+                val client = if (isXmuHost) authClient.apiClient else cdnDownloadClient
+                val req = Request.Builder().url(parsed).get().build()
+
+                client.newCall(req).execute().use { resp ->
+                    if (isXmuHost && (resp.code == 401 || isAuthRedirect(resp.code, resp.header("Location")))) {
+                        return@withContext Result.failure(SessionExpiredException())
+                    }
+                    if (resp.code in 300..399) {
+                        val loc = resp.header("Location").orEmpty()
+                        if (loc.isBlank()) {
+                            return@withContext Result.failure(IOException("重定向地址为空"))
+                        }
+                        currentUrl = parsed.resolve(loc)?.toString() ?: loc
+                        return@use
+                    }
+                    if (!resp.isSuccessful) {
+                        return@withContext Result.failure(IOException("下载失败（HTTP ${resp.code}）"))
+                    }
+                    val body = resp.body ?: return@withContext Result.failure(IOException("文件内容为空"))
+                    val contentLength = body.contentLength()
+                    if (contentLength > maxBytes) {
+                        return@withContext Result.failure(IOException("文件过大（超过 ${maxBytes / (1024 * 1024)} MB），请使用系统应用打开"))
+                    }
+                    val tmpFile = File(destFile.parentFile, "${destFile.name}.tmp")
+                    var total = 0L
+                    body.byteStream().use { input ->
+                        tmpFile.outputStream().use { output ->
+                            val buf = ByteArray(16 * 1024)
+                            while (true) {
+                                val read = input.read(buf)
+                                if (read < 0) break
+                                total += read
+                                if (total > maxBytes) {
+                                    tmpFile.delete()
+                                    return@withContext Result.failure(IOException("文件过大，建议使用外部应用打开"))
+                                }
+                                output.write(buf, 0, read)
+                            }
+                        }
+                    }
+                    if (destFile.exists()) destFile.delete()
+                    if (!tmpFile.renameTo(destFile)) {
+                        tmpFile.copyTo(destFile, overwrite = true)
+                        tmpFile.delete()
+                    }
+                    return@withContext Result.success(destFile)
+                }
+            }
+            Result.failure(IOException("重定向次数过多"))
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun getCourseRollcallsOfStudent(
+        courseId: Long,
+        courseName: String,
+        userId: Long,
+    ): Result<List<RollcallHistoryItem>> = withContext(Dispatchers.IO) {
+        getJson("$baseUrl/api/course/$courseId/student/$userId/rollcalls").map { root ->
+            val arr = root.optObj()?.optArr("rollcalls") ?: root.optArr() ?: return@map emptyList()
+            arr.mapNotNull { elem ->
+                val obj = elem.optObj() ?: return@mapNotNull null
+                val id = obj.optLong("rollcall_id") ?: obj.optLong("id") ?: return@mapNotNull null
+                val title = obj.optStr("title").ifBlank { "课堂点名 #$id" }
+                val rollcallStatus = obj.optStr("rollcall_status").ifBlank { "finished" }
+                val isNumber = obj.optBool("is_number") ?: false
+                val isRadar = obj.optBool("is_radar") ?: false
+                val rawType = obj.optStr("type")
+                val source = obj.optStr("source")
+                val method = when {
+                    isNumber || source == "number" -> "数字口令"
+                    rawType.contains("qr", ignoreCase = true) || source.contains("qr", ignoreCase = true) -> "二维码签到"
+                    isRadar || source == "radar" -> "雷达签到"
+                    rawType == "self_registration" || source == "self_registration" -> "自主签到"
+                    rawType == "auto_attendance" || source == "autoAttendance" -> "自动考勤"
+                    else -> "教师点名"
+                }
+
+                val timeIso = obj.optStr("rollcall_time")
+                    .ifBlank { obj.optStr("published_at") }
+                    .ifBlank { obj.optStr("updated_at") }
+                    .ifBlank { null }
+                val timeText = if (timeIso != null) TimeFormatUtils.formatDeadline(timeIso) else "时间未知"
+
+                val rawStatus = obj.optStr("status")
+                val rawStatusType = obj.optStr("student_status")
+                val rawDetail = obj.optStr("student_status_detail")
+
+                val (mappedStatus, note) = mapRollcallHistoryStatus(
+                    rollcallStatus = rollcallStatus,
+                    rawStatus = rawStatus,
+                    rawStatusType = rawStatusType,
+                    rawDetail = rawDetail,
+                )
+
+                RollcallHistoryItem(
+                    id = id,
+                    courseId = courseId,
+                    courseName = courseName,
+                    title = title,
+                    rollcallTimeText = timeText,
+                    rollcallTimeIso = timeIso,
+                    rollcallMethod = method,
+                    rollcallStatus = rollcallStatus,
+                    studentStatus = mappedStatus,
+                    detailNote = note,
+                )
+            }
+        }
+    }
+
+    private fun mapRollcallHistoryStatus(
+        rollcallStatus: String,
+        rawStatus: String,
+        rawStatusType: String,
+        rawDetail: String,
+    ): Pair<RollcallRecordStatus, String> {
+        val cleanDetail = TimeFormatUtils.stripHtmlToPlainText(rawDetail)
+        if (rollcallStatus.equals("in_progress", ignoreCase = true) &&
+            (rawStatus.isBlank() || rawStatus == "absent")
+        ) {
+            return RollcallRecordStatus.IN_PROGRESS to "点名进行中"
+        }
+        return when (rawStatus.lowercase()) {
+            "on_call_fine", "on_call" -> RollcallRecordStatus.ON_CALL to cleanDetail
+            "on_call_arrive_late" -> RollcallRecordStatus.LATE to cleanDetail.ifBlank { "迟到" }
+            "on_call_leave_early" -> RollcallRecordStatus.EARLY_LEAVE to cleanDetail.ifBlank { "早退" }
+            "on_call_arrive_late_leave_early" -> RollcallRecordStatus.LATE_AND_EARLY to cleanDetail.ifBlank { "迟到且早退" }
+            "on_personal_leave" -> RollcallRecordStatus.ON_LEAVE to cleanDetail.ifBlank { "事假" }
+            "on_sick_leave" -> RollcallRecordStatus.ON_LEAVE to cleanDetail.ifBlank { "病假" }
+            "on_public_leave" -> RollcallRecordStatus.ON_LEAVE to cleanDetail.ifBlank { "公假" }
+            "on_physiological_leave" -> RollcallRecordStatus.ON_LEAVE to cleanDetail.ifBlank { "生理假" }
+            "on_funeral_leave" -> RollcallRecordStatus.ON_LEAVE to cleanDetail.ifBlank { "丧假" }
+            "on_mental_health_leave" -> RollcallRecordStatus.ON_LEAVE to cleanDetail.ifBlank { "心理假" }
+            "on_leave" -> RollcallRecordStatus.ON_LEAVE to cleanDetail.ifBlank { "请假" }
+            "absent" -> RollcallRecordStatus.ABSENT to cleanDetail
+            else -> when (rawStatusType.lowercase()) {
+                "on_call" -> RollcallRecordStatus.ON_CALL to cleanDetail
+                "on_leave" -> RollcallRecordStatus.ON_LEAVE to cleanDetail.ifBlank { "请假" }
+                "absent" -> RollcallRecordStatus.ABSENT to cleanDetail
+                else -> RollcallRecordStatus.UNKNOWN to cleanDetail
+            }
         }
     }
 

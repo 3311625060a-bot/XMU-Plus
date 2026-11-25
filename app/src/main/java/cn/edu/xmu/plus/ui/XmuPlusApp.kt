@@ -43,12 +43,14 @@ import cn.edu.xmu.plus.auth.AuthState
 import cn.edu.xmu.plus.auth.LoginUiState
 import cn.edu.xmu.plus.data.AccentTone
 import cn.edu.xmu.plus.data.ActiveRollcall
+import cn.edu.xmu.plus.data.AttachmentPreviewInfo
 import cn.edu.xmu.plus.data.CourseDetailUiState
 import cn.edu.xmu.plus.data.CourseItem
 import cn.edu.xmu.plus.data.DarkModePreference
 import cn.edu.xmu.plus.data.DockStyle
 import cn.edu.xmu.plus.data.HomeworkDetailUiState
 import cn.edu.xmu.plus.data.PickedLocalFile
+import cn.edu.xmu.plus.data.RollcallHistoryUiState
 import cn.edu.xmu.plus.data.ThemeSettings
 import cn.edu.xmu.plus.data.XmuDashboardState
 import cn.edu.xmu.plus.network.CheckInApiResult
@@ -65,18 +67,23 @@ import cn.edu.xmu.plus.ui.screens.HomeScreen
 import cn.edu.xmu.plus.ui.screens.HomeworkDetailScreen
 import cn.edu.xmu.plus.ui.screens.HomeworkFilter
 import cn.edu.xmu.plus.ui.screens.HomeworkScreen
+import cn.edu.xmu.plus.ui.screens.InAppViewerScreen
 import cn.edu.xmu.plus.ui.screens.LoginScreen
 import cn.edu.xmu.plus.ui.screens.ProfileScreen
 import cn.edu.xmu.plus.ui.screens.QrScannerScreen
+import cn.edu.xmu.plus.ui.screens.RollcallHistoryScreen
 import cn.edu.xmu.plus.ui.screens.SettingsScreen
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
+import java.io.File
 
 private const val ROUTE_HOMEWORK_DETAIL = "homework_detail/{homeworkId}/{sourceTag}"
 private const val ROUTE_SETTINGS = "settings/{sourceTag}"
 private const val ROUTE_LOGIN = "login"
 private const val ROUTE_QR_SCANNER = "qr_scanner"
 private const val ROUTE_SEARCH = "search"
+private const val ROUTE_ROLLCALL_HISTORY = "rollcall_history"
+private const val ROUTE_VIEWER = "viewer/{uploadId}/{fileName}"
 
 private val TABLET_BREAKPOINT_DP = 600.dp
 
@@ -114,9 +121,11 @@ fun XmuPlusApp(
     dashboardState: XmuDashboardState,
     courseDetails: Map<Long, CourseDetailUiState>,
     homeworkDetails: Map<Long, HomeworkDetailUiState>,
+    rollcallHistory: RollcallHistoryUiState,
     isIndexingSearch: Boolean,
     onRefreshAll: () -> Unit,
     onRefreshRollcalls: () -> Unit,
+    onRefreshRollcallHistory: (Boolean) -> Unit,
     onSelectSemester: (Long?) -> Unit,
     onLoadCourseDetail: (CourseItem) -> Unit,
     onLoadHomeworkDetail: (Long) -> Unit,
@@ -125,7 +134,9 @@ fun XmuPlusApp(
     onSubmitQrCheckIn: suspend (String) -> CheckInApiResult,
     onResolvePickedFile: (Uri) -> PickedLocalFile,
     onSubmitHomework: suspend (Long, String, List<PickedLocalFile>, Long?, (Float, String) -> Unit) -> Result<Unit>,
-    onOpenAttachment: (Long, String) -> Unit,
+    onResolveAttachmentPreview: suspend (Long, String) -> Result<AttachmentPreviewInfo>,
+    onDownloadPreviewFile: suspend (String, File) -> Result<File>,
+    onSyncWebViewCookies: () -> Unit,
     onSelectAccentTone: (AccentTone) -> Unit,
     onSelectDarkMode: (DarkModePreference) -> Unit,
     onSelectDockStyle: (DockStyle) -> Unit,
@@ -161,6 +172,11 @@ fun XmuPlusApp(
     fun navigateToHomework(filter: HomeworkFilter) {
         homeworkFilter = filter
         navigateToMainTab(MainDestination.HOMEWORK)
+    }
+
+    fun openAttachmentViewer(uploadId: Long, title: String) {
+        val encodedName = Uri.encode(title.ifBlank { "附件预览" })
+        navController.navigate("viewer/$uploadId/$encodedName")
     }
 
     CompositionLocalProvider(
@@ -274,6 +290,7 @@ fun XmuPlusApp(
                                         passcodeTarget = rollcall
                                         showPasscodeSheet = true
                                     },
+                                    onOpenRollcallHistory = { navController.navigate(ROUTE_ROLLCALL_HISTORY) },
                                     onOpenHomeworkDetail = { hwId, sourceTag ->
                                         navController.navigate("homework_detail/$hwId/$sourceTag")
                                     },
@@ -297,7 +314,7 @@ fun XmuPlusApp(
                                     isTabletLayout = isTabletLayout,
                                     homeworkDetails = homeworkDetails,
                                     onLoadHomeworkDetail = onLoadHomeworkDetail,
-                                    onOpenAttachment = onOpenAttachment,
+                                    onOpenAttachment = ::openAttachmentViewer,
                                     onResolvePickedFile = onResolvePickedFile,
                                     onSubmitHomework = onSubmitHomework,
                                 )
@@ -307,10 +324,12 @@ fun XmuPlusApp(
                                 CoursesScreen(
                                     dashboardState = dashboardState,
                                     courseDetails = courseDetails,
+                                    rollcallHistory = rollcallHistory,
                                     onSelectSemester = onSelectSemester,
                                     onRefreshAll = onRefreshAll,
                                     onLoadCourseDetail = onLoadCourseDetail,
-                                    onOpenAttachment = onOpenAttachment,
+                                    onLoadRollcallHistory = onRefreshRollcallHistory,
+                                    onOpenAttachment = ::openAttachmentViewer,
                                     onOpenHomeworkDetail = { hwId, sourceTag ->
                                         navController.navigate("homework_detail/$hwId/$sourceTag")
                                     },
@@ -334,6 +353,7 @@ fun XmuPlusApp(
                                     onOpenCourses = { navigateToMainTab(MainDestination.COURSES) },
                                     onOpenPendingHomework = { navigateToHomework(HomeworkFilter.PENDING) },
                                     onOpenGradedHomework = { navigateToHomework(HomeworkFilter.GRADED) },
+                                    onOpenRollcallHistory = { navController.navigate(ROUTE_ROLLCALL_HISTORY) },
                                     onOpenSettings = { sourceTag ->
                                         navController.navigate("settings/$sourceTag")
                                     },
@@ -354,7 +374,37 @@ fun XmuPlusApp(
                                         navController.popBackStack()
                                         navigateToMainTab(MainDestination.COURSES)
                                     },
-                                    onOpenAttachment = onOpenAttachment,
+                                    onOpenAttachment = ::openAttachmentViewer,
+                                    onBack = { navController.popBackStack() },
+                                )
+                            }
+
+                            composable(ROUTE_ROLLCALL_HISTORY) {
+                                RollcallHistoryScreen(
+                                    uiState = rollcallHistory,
+                                    isDemoMode = dashboardState.isDemoMode,
+                                    onRefresh = onRefreshRollcallHistory,
+                                    onBack = { navController.popBackStack() },
+                                )
+                            }
+
+                            composable(
+                                route = ROUTE_VIEWER,
+                                arguments = listOf(
+                                    navArgument("uploadId") { type = NavType.LongType },
+                                    navArgument("fileName") { type = NavType.StringType },
+                                ),
+                            ) { entry ->
+                                val uploadId = entry.arguments?.getLong("uploadId") ?: 0L
+                                val fileName = Uri.decode(entry.arguments?.getString("fileName").orEmpty())
+                                    .ifBlank { "附件预览" }
+                                InAppViewerScreen(
+                                    uploadId = uploadId,
+                                    initialFileName = fileName,
+                                    isDemoMode = dashboardState.isDemoMode,
+                                    onResolvePreview = onResolveAttachmentPreview,
+                                    onDownloadFile = onDownloadPreviewFile,
+                                    onSyncWebViewCookies = onSyncWebViewCookies,
                                     onBack = { navController.popBackStack() },
                                 )
                             }
@@ -424,7 +474,7 @@ fun XmuPlusApp(
                                     detailState = homeworkDetails[hwId],
                                     fallbackHomework = fallbackHw,
                                     onLoadHomeworkDetail = onLoadHomeworkDetail,
-                                    onOpenAttachment = onOpenAttachment,
+                                    onOpenAttachment = ::openAttachmentViewer,
                                     onResolvePickedFile = onResolvePickedFile,
                                     onSubmitHomework = onSubmitHomework,
                                     sharedTransitionScope = this@SharedTransitionLayout,
