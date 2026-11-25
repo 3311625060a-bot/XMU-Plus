@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">XMU Plus</string>
+    <string name="widget_ddl_name">待交作业 DDL 倒计时</string>
+    <string name="widget_ddl_description">在桌面快速查看即将截止的畅课作业与倒计时</string>
+</resources>
