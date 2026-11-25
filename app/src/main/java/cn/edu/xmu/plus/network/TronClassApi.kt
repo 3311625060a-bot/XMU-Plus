@@ -14,9 +14,12 @@ import cn.edu.xmu.plus.data.RollcallHistoryItem
 import cn.edu.xmu.plus.data.RollcallRecordStatus
 import cn.edu.xmu.plus.data.SemesterItem
 import cn.edu.xmu.plus.data.TimeFormatUtils
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -64,6 +67,7 @@ class TronClassApi(
 
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
     private val baseUrl = XmuAuthClient.LNT_BASE_URL
+    private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val cdnDownloadClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .followRedirects(false)
@@ -336,117 +340,125 @@ class TronClassApi(
         userId: Long,
         fallback: HomeworkItem?,
     ): Result<HomeworkItem> = withContext(Dispatchers.IO) {
-        val activityRes = getJson("$baseUrl/api/activities/$homeworkId?sub_course_id=0")
-        val actObj = activityRes.getOrNull()?.optObj()
-        if (actObj == null && fallback == null) {
-            return@withContext Result.failure(activityRes.exceptionOrNull() ?: IOException("无法获取作业详情"))
-        }
+        coroutineScope {
+            val activityDeferred = async { getJson("$baseUrl/api/activities/$homeworkId?sub_course_id=0") }
+            val subListDeferred = async { getJson("$baseUrl/api/activities/$homeworkId/students/$userId/submission_list") }
+            val scoreDeferred = async { getJson("$baseUrl/api/activities/$homeworkId/students/$userId/homework-score") }
 
-        // Best-effort mark read
-        runCatching {
-            val readReq = Request.Builder()
-                .url("$baseUrl/api/course/activities-read/$homeworkId")
-                .post("{}".toRequestBody(jsonMediaType))
-                .build()
-            authClient.apiClient.newCall(readReq).execute().close()
-        }
-
-        val isGroup = actObj?.optBool("submit_by_group") ?: fallback?.isGroupHomework ?: false
-        val subListRes = getJson("$baseUrl/api/activities/$homeworkId/students/$userId/submission_list")
-        val subListObj = subListRes.getOrNull()?.optObj()
-        val subArr = subListObj?.optArr("list")
-            ?: subListObj?.optArr("submissions")
-            ?: subListRes.getOrNull()?.optArr()
-        val latestSub = subArr?.firstOrNull()?.optObj()
-
-        val scoreRes = getJson("$baseUrl/api/activities/$homeworkId/students/$userId/homework-score")
-        val scoreObj = scoreRes.getOrNull()?.optObj()
-
-        val baseItem = if (actObj != null) {
-            parseHomeworkObject(
-                obj = actObj,
-                fallbackCourseId = fallback?.courseId ?: 0L,
-                fallbackCourseName = fallback?.courseName.orEmpty().ifBlank { "课程作业" },
-            )
-        } else {
-            fallback
-        } ?: return@withContext Result.failure(IOException("无法解析作业详情"))
-
-        val submissionId = latestSub?.optLong("id") ?: baseItem.submissionId
-        val submittedAtRaw = latestSub?.optStr("created_at")?.ifBlank { latestSub.optStr("updated_at") }
-        val submittedContent = TimeFormatUtils.stripHtmlToPlainText(
-            latestSub?.optStr("comment").orEmpty(),
-        ).ifBlank { baseItem.submittedContent }
-        val submittedAttachmentFiles = parseUploads(latestSub?.optArr("uploads"))
-            .ifEmpty { baseItem.submittedAttachmentFiles }
-
-        val rawScore = scoreObj?.optScore("final_score")
-            ?: scoreObj?.optScore("score")
-            ?: latestSub?.optScore("score")
-            ?: baseItem.score
-        val fullScore = actObj?.optScore("score")
-            ?: scoreObj?.optScore("full_score")
-            ?: actObj?.optObj("data")?.optScore("full_score")
-            ?: baseItem.fullScore
-        val comment = scoreObj?.optStr("instructor_comment")?.ifBlank { null }
-            ?: latestSub?.optStr("instructor_comment")?.ifBlank { null }
-            ?: baseItem.teacherComment
-        val rawDupRate = latestSub?.optScore("duplicate_rate")
-            ?: latestSub?.optScore("similarity")
-            ?: latestSub?.optScore("plagiarism_rate")
-            ?: latestSub?.optScore("repeat_rate")
-            ?: scoreObj?.optScore("duplicate_rate")
-            ?: scoreObj?.optScore("similarity")
-            ?: latestSub?.optObj("check_result")?.optScore("duplicate_rate")
-            ?: baseItem.duplicateRate
-        val normalizedDupRate = rawDupRate?.let { raw ->
-            val clean = raw.removeSuffix("%").trim()
-            val num = clean.toDoubleOrNull()
-            when {
-                raw.contains("%") -> raw
-                num != null && num in 0.0..1.0 -> "${(num * 100).toInt()}%"
-                num != null -> "${clean}%"
-                else -> raw
+            // Fire-and-forget mark read truly asynchronously without delaying UI render
+            backgroundScope.launch {
+                runCatching {
+                    val readReq = Request.Builder()
+                        .url("$baseUrl/api/course/activities-read/$homeworkId")
+                        .post("{}".toRequestBody(jsonMediaType))
+                        .build()
+                    authClient.apiClient.newCall(readReq).execute().close()
+                }
             }
-        }
-        val graderName = scoreObj?.optStr("grader_name")?.ifBlank { null }
-            ?: scoreObj?.optStr("instructor_name")?.ifBlank { null }
-            ?: scoreObj?.optObj("grader")?.optStr("name")?.ifBlank { null }
-            ?: latestSub?.optObj("grader")?.optStr("name")?.ifBlank { null }
-            ?: baseItem.graderName
-        val gradedAtRaw = scoreObj?.optStr("updated_at")?.ifBlank { scoreObj.optStr("created_at") }
-            ?: scoreObj?.optStr("graded_at")?.ifBlank { null }
-        val gradedAt = gradedAtRaw?.takeIf { it.isNotBlank() }?.let { TimeFormatUtils.formatDeadline(it) }
-            ?: baseItem.gradedAt
-        val submissionCount = subArr?.size ?: baseItem.submissionCount
 
-        val finalStatus = when {
-            !rawScore.isNullOrBlank() -> HomeworkStatus.GRADED
-            submissionId != null || !submittedAtRaw.isNullOrBlank() -> HomeworkStatus.SUBMITTED
-            else -> baseItem.status
-        }
-        val (remaining, urgency) = TimeFormatUtils.computeRemainingAndUrgency(baseItem.endTimeIso, finalStatus)
+            val activityRes = activityDeferred.await()
+            val actObj = activityRes.getOrNull()?.optObj()
+            if (actObj == null && fallback == null) {
+                return@coroutineScope Result.failure(activityRes.exceptionOrNull() ?: IOException("无法获取作业详情"))
+            }
 
-        Result.success(
-            baseItem.copy(
-                status = finalStatus,
-                remainingText = remaining,
-                urgency = urgency,
-                isGroupHomework = isGroup,
-                submissionId = submissionId,
-                submittedAt = submittedAtRaw?.let { TimeFormatUtils.formatDeadline(it) } ?: baseItem.submittedAt,
-                submittedContent = submittedContent,
-                submittedAttachmentFiles = submittedAttachmentFiles,
-                submittedFiles = submittedAttachmentFiles.map { it.name }.ifEmpty { baseItem.submittedFiles },
-                score = rawScore,
-                teacherComment = comment,
-                fullScore = fullScore,
-                duplicateRate = normalizedDupRate,
-                gradedAt = gradedAt,
-                graderName = graderName,
-                submissionCount = submissionCount,
-            ),
-        )
+            val isGroup = actObj?.optBool("submit_by_group") ?: fallback?.isGroupHomework ?: false
+            val subListRes = subListDeferred.await()
+            val subListObj = subListRes.getOrNull()?.optObj()
+            val subArr = subListObj?.optArr("list")
+                ?: subListObj?.optArr("submissions")
+                ?: subListRes.getOrNull()?.optArr()
+            val latestSub = subArr?.firstOrNull()?.optObj()
+
+            val scoreRes = scoreDeferred.await()
+            val scoreObj = scoreRes.getOrNull()?.optObj()
+
+            val baseItem = if (actObj != null) {
+                parseHomeworkObject(
+                    obj = actObj,
+                    fallbackCourseId = fallback?.courseId ?: 0L,
+                    fallbackCourseName = fallback?.courseName.orEmpty().ifBlank { "课程作业" },
+                )
+            } else {
+                fallback
+            } ?: return@coroutineScope Result.failure(IOException("无法解析作业详情"))
+
+            val submissionId = latestSub?.optLong("id") ?: baseItem.submissionId
+            val submittedAtRaw = latestSub?.optStr("created_at")?.ifBlank { latestSub.optStr("updated_at") }
+            val submittedContent = TimeFormatUtils.stripHtmlToPlainText(
+                latestSub?.optStr("comment").orEmpty(),
+            ).ifBlank { baseItem.submittedContent }
+            val submittedAttachmentFiles = parseUploads(latestSub?.optArr("uploads"))
+                .ifEmpty { baseItem.submittedAttachmentFiles }
+
+            val rawScore = scoreObj?.optScore("final_score")
+                ?: scoreObj?.optScore("score")
+                ?: latestSub?.optScore("score")
+                ?: baseItem.score
+            val fullScore = actObj?.optScore("score")
+                ?: scoreObj?.optScore("full_score")
+                ?: actObj?.optObj("data")?.optScore("full_score")
+                ?: baseItem.fullScore
+            val comment = scoreObj?.optStr("instructor_comment")?.ifBlank { null }
+                ?: latestSub?.optStr("instructor_comment")?.ifBlank { null }
+                ?: baseItem.teacherComment
+            val rawDupRate = latestSub?.optScore("duplicate_rate")
+                ?: latestSub?.optScore("similarity")
+                ?: latestSub?.optScore("plagiarism_rate")
+                ?: latestSub?.optScore("repeat_rate")
+                ?: scoreObj?.optScore("duplicate_rate")
+                ?: scoreObj?.optScore("similarity")
+                ?: latestSub?.optObj("check_result")?.optScore("duplicate_rate")
+                ?: baseItem.duplicateRate
+            val normalizedDupRate = rawDupRate?.let { raw ->
+                val clean = raw.removeSuffix("%").trim()
+                val num = clean.toDoubleOrNull()
+                when {
+                    raw.contains("%") -> raw
+                    num != null && num in 0.0..1.0 -> "${(num * 100).toInt()}%"
+                    num != null -> "${clean}%"
+                    else -> raw
+                }
+            }
+            val graderName = scoreObj?.optStr("grader_name")?.ifBlank { null }
+                ?: scoreObj?.optStr("instructor_name")?.ifBlank { null }
+                ?: scoreObj?.optObj("grader")?.optStr("name")?.ifBlank { null }
+                ?: latestSub?.optObj("grader")?.optStr("name")?.ifBlank { null }
+                ?: baseItem.graderName
+            val gradedAtRaw = scoreObj?.optStr("updated_at")?.ifBlank { scoreObj.optStr("created_at") }
+                ?: scoreObj?.optStr("graded_at")?.ifBlank { null }
+            val gradedAt = gradedAtRaw?.takeIf { it.isNotBlank() }?.let { TimeFormatUtils.formatDeadline(it) }
+                ?: baseItem.gradedAt
+            val submissionCount = subArr?.size ?: baseItem.submissionCount
+
+            val finalStatus = when {
+                !rawScore.isNullOrBlank() -> HomeworkStatus.GRADED
+                submissionId != null || !submittedAtRaw.isNullOrBlank() -> HomeworkStatus.SUBMITTED
+                else -> baseItem.status
+            }
+            val (remaining, urgency) = TimeFormatUtils.computeRemainingAndUrgency(baseItem.endTimeIso, finalStatus)
+
+            Result.success(
+                baseItem.copy(
+                    status = finalStatus,
+                    remainingText = remaining,
+                    urgency = urgency,
+                    isGroupHomework = isGroup,
+                    submissionId = submissionId,
+                    submittedAt = submittedAtRaw?.let { TimeFormatUtils.formatDeadline(it) } ?: baseItem.submittedAt,
+                    submittedContent = submittedContent,
+                    submittedAttachmentFiles = submittedAttachmentFiles,
+                    submittedFiles = submittedAttachmentFiles.map { it.name }.ifEmpty { baseItem.submittedFiles },
+                    score = rawScore,
+                    teacherComment = comment,
+                    fullScore = fullScore,
+                    duplicateRate = normalizedDupRate,
+                    gradedAt = gradedAt,
+                    graderName = graderName,
+                    submissionCount = submissionCount,
+                ),
+            )
+        }
     }
 
     suspend fun getCourseBulletins(courseId: Long): Result<List<BulletinItem>> = withContext(Dispatchers.IO) {
@@ -545,10 +557,17 @@ class TronClassApi(
         }
         try {
             coroutineScope {
+                val hintExt = hintFileName.substringAfterLast('.', "").lowercase()
+                val docHint = hintExt in setOf("pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "wps", "rtf")
                 val infoDeferred = async { getJson("$baseUrl/api/uploads/$uploadId") }
                 val wpsDeferred = async { getJson("$baseUrl/api/uploads/$uploadId/preview/private-wps") }
                 val aliyunDeferred = async { getJson("$baseUrl/api/aliyun-office/token?upload_id=$uploadId&is_mobile=true") }
                 val directDeferred = async { getUploadDownloadUrl(uploadId) }
+                val docDeferred = if (docHint) {
+                    async { getJson("$baseUrl/api/uploads/document/$uploadId/url?preview=true") }
+                } else {
+                    null
+                }
 
                 val infoObj = infoDeferred.await().getOrNull()?.optObj()
                 val resolvedName = infoObj?.optStr("name")?.ifBlank { null } ?: hintFileName
@@ -562,20 +581,18 @@ class TronClassApi(
 
                 var pdfPreviewUrl: String? = null
                 if (isDocCandidate) {
-                    val docUrlRes = if (refId > 0L) {
-                        getJson("$baseUrl/api/uploads/reference/document/$refId/url?preview=true")
-                    } else {
-                        getJson("$baseUrl/api/uploads/document/$uploadId/url?preview=true")
-                    }
-                    val docRaw = docUrlRes.getOrNull()?.optObj()?.optStr("url").orEmpty()
-                        .ifBlank {
-                            if (refId > 0L) {
-                                getJson("$baseUrl/api/uploads/document/$uploadId/url?preview=true")
-                                    .getOrNull()?.optObj()?.optStr("url").orEmpty()
-                            } else {
-                                ""
-                            }
+                    val primaryRaw = docDeferred?.await()?.getOrNull()?.optObj()?.optStr("url").orEmpty()
+                    val docRaw = when {
+                        primaryRaw.isNotBlank() -> primaryRaw
+                        refId > 0L -> {
+                            getJson("$baseUrl/api/uploads/reference/document/$refId/url?preview=true")
+                                .getOrNull()?.optObj()?.optStr("url").orEmpty()
                         }
+                        else -> {
+                            getJson("$baseUrl/api/uploads/document/$uploadId/url?preview=true")
+                                .getOrNull()?.optObj()?.optStr("url").orEmpty()
+                        }
+                    }
                     if (docRaw.isNotBlank()) {
                         pdfPreviewUrl = if (docRaw.startsWith("http")) docRaw else "$baseUrl$docRaw"
                     }

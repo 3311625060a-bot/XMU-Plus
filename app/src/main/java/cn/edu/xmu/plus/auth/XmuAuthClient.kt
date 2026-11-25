@@ -3,10 +3,15 @@ package cn.edu.xmu.plus.auth
 import android.util.Log
 import android.webkit.CookieManager
 import cn.edu.xmu.plus.debug.DebugLogStore
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.booleanOrNull
@@ -15,8 +20,10 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import okhttp3.ConnectionPool
 import okhttp3.Cookie
 import okhttp3.CookieJar
+import okhttp3.Dispatcher
 import okhttp3.FormBody
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
@@ -26,6 +33,7 @@ import java.io.IOException
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 data class CasFormFields(
     val execution: String,
@@ -45,10 +53,29 @@ class XmuAuthClient(
         isLenient = true
     }
 
+    private data class PrewarmedCasSession(
+        val cookieJar: InMemoryCookieJar,
+        val casPostUrl: String,
+        val form: CasFormFields,
+        val fetchedAtMillis: Long,
+    )
+
+    private val sharedConnectionPool = ConnectionPool(16, 5, TimeUnit.MINUTES)
+    private val sharedDispatcher = Dispatcher().apply {
+        maxRequests = 64
+        maxRequestsPerHost = 12
+    }
+    private val prewarmMutex = Mutex()
+    private val prewarmedCas = AtomicReference<PrewarmedCasSession?>(null)
+    @Volatile
+    private var inFlightPrewarm: CompletableDeferred<PrewarmedCasSession?>? = null
+
     val apiClient: OkHttpClient = OkHttpClient.Builder()
+        .connectionPool(sharedConnectionPool)
+        .dispatcher(sharedDispatcher)
         .followRedirects(false)
         .followSslRedirects(false)
-        .connectTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(12, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
         .writeTimeout(20, TimeUnit.SECONDS)
         .addInterceptor { chain ->
@@ -108,59 +135,133 @@ class XmuAuthClient(
         }
         .build()
 
+    private fun buildSsoHttpClient(cookieJar: CookieJar, followRedirects: Boolean): OkHttpClient {
+        return OkHttpClient.Builder()
+            .connectionPool(sharedConnectionPool)
+            .dispatcher(sharedDispatcher)
+            .cookieJar(cookieJar)
+            .followRedirects(followRedirects)
+            .followSslRedirects(followRedirects)
+            .connectTimeout(12, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
+            .build()
+    }
+
+    suspend fun prewarmSso() {
+        val existing = prewarmedCas.get()
+        if (existing != null && System.currentTimeMillis() - existing.fetchedAtMillis < PREWARM_TTL_MS) {
+            return
+        }
+        val deferred = prewarmMutex.withLock {
+            val active = inFlightPrewarm
+            if (active != null && active.isActive) return@withLock active
+            val fresh = CompletableDeferred<PrewarmedCasSession?>()
+            inFlightPrewarm = fresh
+            scope.launch {
+                val res = runCatching { fetchCasSessionPage() }.getOrNull()
+                if (res != null) {
+                    prewarmedCas.set(res)
+                }
+                fresh.complete(res)
+                inFlightPrewarm = null
+            }
+            fresh
+        }
+        deferred.await()
+    }
+
+    private fun fetchCasSessionPage(): PrewarmedCasSession? {
+        val cookieJar = InMemoryCookieJar()
+        val client = buildSsoHttpClient(cookieJar = cookieJar, followRedirects = true)
+        val casPageRequest = Request.Builder()
+            .url(SSO_ENTRY_URL)
+            .header("User-Agent", MOBILE_UA)
+            .get()
+            .build()
+        val (casPostUrl, casHtml) = client.newCall(casPageRequest).execute().use { resp ->
+            val bodyStr = resp.body?.string().orEmpty()
+            resp.request.url.toString() to bodyStr
+        }
+        val form = parseCasPwdForm(casHtml) ?: return null
+        return PrewarmedCasSession(
+            cookieJar = cookieJar,
+            casPostUrl = casPostUrl,
+            form = form,
+            fetchedAtMillis = System.currentTimeMillis(),
+        )
+    }
+
+    private fun checkNeedCaptchaRemote(username: String, referer: String? = null): Boolean {
+        val encodedUser = URLEncoder.encode(username, "UTF-8")
+        val captchaCheckUrl =
+            "https://ids.xmu.edu.cn/authserver/checkNeedCaptcha.htl?username=$encodedUser&_=${System.currentTimeMillis()}"
+        val reqBuilder = Request.Builder()
+            .url(captchaCheckUrl)
+            .header("User-Agent", MOBILE_UA)
+            .header("X-Requested-With", "XMLHttpRequest")
+        if (!referer.isNullOrBlank()) {
+            reqBuilder.header("Referer", referer)
+        }
+        val client = buildSsoHttpClient(cookieJar = InMemoryCookieJar(), followRedirects = true)
+        return client.newCall(reqBuilder.get().build()).execute().use { resp ->
+            val raw = resp.body?.string().orEmpty()
+            runCatching {
+                json.parseToJsonElement(raw).jsonObject["isNeed"]?.jsonPrimitive?.booleanOrNull ?: false
+            }.getOrDefault(false)
+        }
+    }
+
     suspend fun loginNative(username: String, password: String): LoginResult = withContext(Dispatchers.IO) {
         val trimmedUser = username.trim()
         if (trimmedUser.isEmpty() || password.isEmpty()) {
             return@withContext LoginResult.Error("请输入学号和密码", canFallbackToWebView = false)
         }
 
-        val cookieJar = InMemoryCookieJar()
-        val ssoClient = OkHttpClient.Builder()
-            .cookieJar(cookieJar)
-            .followRedirects(true)
-            .followSslRedirects(true)
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
-            .build()
+        val loginStartMs = System.currentTimeMillis()
 
         try {
-            // 1. Enter TronClass login -> Keycloak -> CAS login page
-            val casPageRequest = Request.Builder()
-                .url(SSO_ENTRY_URL)
-                .header("User-Agent", MOBILE_UA)
-                .get()
-                .build()
+            val inFlight = inFlightPrewarm
+            var cachedPrewarm = prewarmedCas.getAndSet(null)
+                ?.takeIf { System.currentTimeMillis() - it.fetchedAtMillis < PREWARM_TTL_MS }
 
-            val (casPostUrl, casHtml) = ssoClient.newCall(casPageRequest).execute().use { resp ->
-                val bodyStr = resp.body?.string().orEmpty()
-                resp.request.url.toString() to bodyStr
+            var usedPrewarm = false
+            val sessionSetup: PrewarmedCasSession?
+            val needCaptcha: Boolean
+
+            if (cachedPrewarm != null) {
+                usedPrewarm = true
+                sessionSetup = cachedPrewarm
+                needCaptcha = checkNeedCaptchaRemote(trimmedUser, cachedPrewarm.casPostUrl)
+            } else if (inFlight != null && inFlight.isActive) {
+                coroutineScope {
+                    val captchaDeferred = async { runCatching { checkNeedCaptchaRemote(trimmedUser) }.getOrDefault(false) }
+                    val prewarmRes = inFlight.await()
+                    prewarmedCas.compareAndSet(prewarmRes, null)
+                    if (prewarmRes != null) {
+                        usedPrewarm = true
+                        sessionSetup = prewarmRes
+                    } else {
+                        sessionSetup = fetchCasSessionPage()
+                    }
+                    needCaptcha = captchaDeferred.await()
+                }
+            } else {
+                // Cold path: fetch CAS login page & captcha check in parallel
+                coroutineScope {
+                    val casDeferred = async { fetchCasSessionPage() }
+                    val captchaDeferred = async { runCatching { checkNeedCaptchaRemote(trimmedUser) }.getOrDefault(false) }
+                    sessionSetup = casDeferred.await()
+                    needCaptcha = captchaDeferred.await()
+                }
             }
 
-            val form = parseCasPwdForm(casHtml)
-                ?: return@withContext LoginResult.CaptchaRequired(
+            if (sessionSetup == null) {
+                return@withContext LoginResult.CaptchaRequired(
                     ssoUrl = SSO_ENTRY_URL,
                     username = trimmedUser,
                     password = password,
                     reason = "正在切换至统一身份认证网页完成登录",
                 )
-
-            // 2. Check whether CAS requires slider/image captcha for this account
-            val encodedUser = URLEncoder.encode(trimmedUser, "UTF-8")
-            val captchaCheckUrl =
-                "https://ids.xmu.edu.cn/authserver/checkNeedCaptcha.htl?username=$encodedUser&_=${System.currentTimeMillis()}"
-            val captchaReq = Request.Builder()
-                .url(captchaCheckUrl)
-                .header("User-Agent", MOBILE_UA)
-                .header("X-Requested-With", "XMLHttpRequest")
-                .header("Referer", casPostUrl)
-                .get()
-                .build()
-
-            val needCaptcha = ssoClient.newCall(captchaReq).execute().use { resp ->
-                val raw = resp.body?.string().orEmpty()
-                runCatching {
-                    json.parseToJsonElement(raw).jsonObject["isNeed"]?.jsonPrimitive?.booleanOrNull ?: false
-                }.getOrDefault(false)
             }
 
             if (needCaptcha) {
@@ -172,126 +273,82 @@ class XmuAuthClient(
                 )
             }
 
-            // 3. Encrypt password using CAS AES-128-CBC salt & submit #pwdFromId
-            val encryptedPassword = CasCrypto.encryptPassword(password, form.pwdEncryptSalt)
-            val formBody = FormBody.Builder()
-                .add("username", trimmedUser)
-                .add("password", encryptedPassword)
-                .add("captcha", "")
-                .add("_eventId", form.eventId)
-                .add("cllt", form.cllt)
-                .add("dllt", form.dllt)
-                .add("lt", form.lt)
-                .add("execution", form.execution)
-                .build()
+            var activeSetup = sessionSetup
+            var outcome = submitCasCredentials(activeSetup, trimmedUser, password)
 
-            val loginReq = Request.Builder()
-                .url(casPostUrl)
-                .header("User-Agent", MOBILE_UA)
-                .header("Origin", "https://ids.xmu.edu.cn")
-                .header("Referer", casPostUrl)
-                .post(formBody)
-                .build()
+            // If prewarmed CAS form/ticket expired server-side without an explicit wrong-password tip, retry once cleanly
+            if (usedPrewarm && outcome.retryWithFreshCas) {
+                val fresh = fetchCasSessionPage()
+                if (fresh != null) {
+                    activeSetup = fresh
+                    outcome = submitCasCredentials(fresh, trimmedUser, password)
+                }
+            }
 
-            val (finalUrl, finalHost, finalHtml, responseSessionHeader) = ssoClient.newCall(loginReq).execute().use { resp ->
-                val html = resp.body?.string().orEmpty()
-                val reqUrl = resp.request.url
-                Quad(
-                    reqUrl.toString(),
-                    reqUrl.host,
-                    html,
-                    resp.header("x-session-id"),
+            outcome.earlyResult?.let { early ->
+                if (early is LoginResult.Error) {
+                    scope.launch { runCatching { prewarmSso() } }
+                }
+                return@withContext early
+            }
+
+            val lntCookies = activeSetup.cookieJar.cookiesForHost("lnt.xmu.edu.cn")
+            val sessionCookie = lntCookies.firstOrNull { it.name == "session" }?.value
+            val sessionId = sessionCookie?.takeIf { it.isNotBlank() }
+                ?: outcome.responseSessionHeader?.takeIf { it.isNotBlank() }
+
+            if (sessionId.isNullOrBlank()) {
+                return@withContext LoginResult.CaptchaRequired(
+                    ssoUrl = outcome.finalUrl.ifBlank { SSO_ENTRY_URL },
+                    username = trimmedUser,
+                    password = password,
+                    reason = "未获取到有效会话凭据，请通过网页认证登录",
                 )
             }
 
-            if (finalHost.contains("ids.xmu.edu.cn")) {
-                val errorTip = extractCasErrorTip(finalHtml)
-                if (errorTip != null && (errorTip.contains("验证码") || errorTip.contains("滑块"))) {
-                    return@withContext LoginResult.CaptchaRequired(
+            val storedCookies = lntCookies.map {
+                StoredCookie(
+                    name = it.name,
+                    value = it.value,
+                    domain = it.domain,
+                    path = it.path,
+                    expiresAt = it.expiresAt,
+                    secure = it.secure,
+                    httpOnly = it.httpOnly,
+                )
+            }
+            val pendingSession = PersistedSession(
+                sessionId = sessionId,
+                cookies = storedCookies,
+                profile = null,
+                savedAtMillis = System.currentTimeMillis(),
+            )
+            // Keep in memory immediately for fetchProfile() without redundant double Keystore+DataStore disk write
+            sessionStore.setMemorySession(pendingSession)
+
+            val profileResult = fetchProfile()
+            return@withContext profileResult.fold(
+                onSuccess = { profile ->
+                    sessionStore.saveSession(pendingSession.copy(profile = profile))
+                    if (DebugLogStore.isEnabled()) {
+                        val totalMs = System.currentTimeMillis() - loginStartMs
+                        DebugLogStore.log("AUTH", "loginNative success in ${totalMs}ms (prewarmed=$usedPrewarm)")
+                    }
+                    LoginResult.Success(profile)
+                },
+                onFailure = { err ->
+                    if (DebugLogStore.isEnabled()) {
+                        Log.w("XmuAuthDiag", "loginNative verify profile failed: ${err.javaClass.simpleName} ${err.message}")
+                        DebugLogStore.log("AUTH", "loginNative verify failed: ${err.javaClass.simpleName}", "ERR")
+                    }
+                    sessionStore.clearSession()
+                    LoginResult.CaptchaRequired(
                         ssoUrl = SSO_ENTRY_URL,
                         username = trimmedUser,
                         password = password,
-                        reason = "需要完成安全验证，请通过内置认证页继续",
+                        reason = "会话校验未通过，请通过内置网页完成认证",
                     )
-                }
-                return@withContext LoginResult.Error(
-                    message = errorTip ?: "学号或密码错误，请核对后重试",
-                    canFallbackToWebView = true,
-                )
-            }
-
-            val lntCookies = cookieJar.cookiesForHost("lnt.xmu.edu.cn")
-            if (finalHost.contains("lnt.xmu.edu.cn") ||
-                finalHost.contains("c-mobile.xmu.edu.cn") ||
-                lntCookies.any { it.name == "session" && it.value.isNotBlank() }
-            ) {
-                val sessionCookie = lntCookies.firstOrNull { it.name == "session" }?.value
-                val sessionId = sessionCookie?.takeIf { it.isNotBlank() }
-                    ?: responseSessionHeader?.takeIf { it.isNotBlank() }
-
-                if (sessionId.isNullOrBlank()) {
-                    return@withContext LoginResult.CaptchaRequired(
-                        ssoUrl = SSO_ENTRY_URL,
-                        username = trimmedUser,
-                        password = password,
-                        reason = "未获取到有效会话凭据，请通过网页认证登录",
-                    )
-                }
-
-                val storedCookies = lntCookies.map {
-                    StoredCookie(
-                        name = it.name,
-                        value = it.value,
-                        domain = it.domain,
-                        path = it.path,
-                        expiresAt = it.expiresAt,
-                        secure = it.secure,
-                        httpOnly = it.httpOnly,
-                    )
-                }
-                sessionStore.saveSession(
-                    PersistedSession(
-                        sessionId = sessionId,
-                        cookies = storedCookies,
-                        profile = null,
-                        savedAtMillis = System.currentTimeMillis(),
-                    ),
-                )
-
-                val profileResult = fetchProfile()
-                return@withContext profileResult.fold(
-                    onSuccess = { profile ->
-                        sessionStore.saveSession(
-                            PersistedSession(
-                                sessionId = sessionId,
-                                cookies = storedCookies,
-                                profile = profile,
-                                savedAtMillis = System.currentTimeMillis(),
-                            ),
-                        )
-                        LoginResult.Success(profile)
-                    },
-                    onFailure = { err ->
-                        if (DebugLogStore.isEnabled()) {
-                            Log.w("XmuAuthDiag", "loginNative verify profile failed: ${err.javaClass.simpleName} ${err.message}")
-                            DebugLogStore.log("AUTH", "loginNative verify failed: ${err.javaClass.simpleName}", "ERR")
-                        }
-                        sessionStore.clearSession()
-                        LoginResult.CaptchaRequired(
-                            ssoUrl = SSO_ENTRY_URL,
-                            username = trimmedUser,
-                            password = password,
-                            reason = "会话校验未通过，请通过内置网页完成认证",
-                        )
-                    },
-                )
-            }
-
-            return@withContext LoginResult.CaptchaRequired(
-                ssoUrl = finalUrl.ifBlank { SSO_ENTRY_URL },
-                username = trimmedUser,
-                password = password,
-                reason = "请通过内置认证页完成登录",
+                },
             )
         } catch (e: IOException) {
             return@withContext LoginResult.Error(
@@ -304,6 +361,108 @@ class XmuAuthClient(
                 canFallbackToWebView = true,
             )
         }
+    }
+
+    private data class CasSubmitOutcome(
+        val finalUrl: String = "",
+        val responseSessionHeader: String? = null,
+        val earlyResult: LoginResult? = null,
+        val retryWithFreshCas: Boolean = false,
+    )
+
+    private fun submitCasCredentials(
+        setup: PrewarmedCasSession,
+        username: String,
+        password: String,
+    ): CasSubmitOutcome {
+        val encryptedPassword = CasCrypto.encryptPassword(password, setup.form.pwdEncryptSalt)
+        val formBody = FormBody.Builder()
+            .add("username", username)
+            .add("password", encryptedPassword)
+            .add("captcha", "")
+            .add("_eventId", setup.form.eventId)
+            .add("cllt", setup.form.cllt)
+            .add("dllt", setup.form.dllt)
+            .add("lt", setup.form.lt)
+            .add("execution", setup.form.execution)
+            .build()
+
+        // Step redirects manually so we abort immediately once lnt.xmu.edu.cn grants a valid session cookie
+        val manualClient = buildSsoHttpClient(cookieJar = setup.cookieJar, followRedirects = false)
+        var currentRequest = Request.Builder()
+            .url(setup.casPostUrl)
+            .header("User-Agent", MOBILE_UA)
+            .header("Origin", "https://ids.xmu.edu.cn")
+            .header("Referer", setup.casPostUrl)
+            .post(formBody)
+            .build()
+
+        var lastUrl = setup.casPostUrl
+        var lastSessionHeader: String? = null
+
+        for (hop in 0 until 10) {
+            manualClient.newCall(currentRequest).execute().use { resp ->
+                val reqUrl = resp.request.url
+                lastUrl = reqUrl.toString()
+                val headerSession = resp.header("x-session-id")
+                if (!headerSession.isNullOrBlank()) {
+                    lastSessionHeader = headerSession
+                }
+
+                // Early exit as soon as lnt.xmu.edu.cn issues the session cookie, avoiding extra portal HTML fetch
+                val hasLntSession = setup.cookieJar.cookiesForHost("lnt.xmu.edu.cn")
+                    .any { it.name == "session" && it.value.isNotBlank() }
+                if (hasLntSession || !lastSessionHeader.isNullOrBlank()) {
+                    return CasSubmitOutcome(
+                        finalUrl = lastUrl,
+                        responseSessionHeader = lastSessionHeader,
+                    )
+                }
+
+                val code = resp.code
+                val location = resp.header("Location")
+                if (code in 300..399 && !location.isNullOrBlank()) {
+                    val nextUrl = reqUrl.resolve(location) ?: return CasSubmitOutcome(finalUrl = lastUrl)
+                    currentRequest = Request.Builder()
+                        .url(nextUrl)
+                        .header("User-Agent", MOBILE_UA)
+                        .get()
+                        .build()
+                    return@use
+                }
+
+                val html = resp.body?.string().orEmpty()
+                val host = reqUrl.host
+                if (host.contains("ids.xmu.edu.cn")) {
+                    val errorTip = extractCasErrorTip(html)
+                    if (errorTip != null && (errorTip.contains("验证码") || errorTip.contains("滑块"))) {
+                        return CasSubmitOutcome(
+                            earlyResult = LoginResult.CaptchaRequired(
+                                ssoUrl = SSO_ENTRY_URL,
+                                username = username,
+                                password = password,
+                                reason = "需要完成安全验证，请通过内置认证页继续",
+                            ),
+                        )
+                    }
+                    if (errorTip == null && parseCasPwdForm(html) != null) {
+                        return CasSubmitOutcome(finalUrl = lastUrl, retryWithFreshCas = true)
+                    }
+                    return CasSubmitOutcome(
+                        earlyResult = LoginResult.Error(
+                            message = errorTip ?: "学号或密码错误，请核对后重试",
+                            canFallbackToWebView = true,
+                        ),
+                    )
+                }
+
+                return CasSubmitOutcome(
+                    finalUrl = lastUrl,
+                    responseSessionHeader = lastSessionHeader,
+                )
+            }
+        }
+        return CasSubmitOutcome(finalUrl = lastUrl, responseSessionHeader = lastSessionHeader)
     }
 
     suspend fun completeWebViewLogin(rawCookieHeader: String): LoginResult = withContext(Dispatchers.IO) {
@@ -319,7 +478,7 @@ class XmuAuthClient(
             profile = null,
             savedAtMillis = System.currentTimeMillis(),
         )
-        sessionStore.saveSession(session)
+        sessionStore.setMemorySession(session)
 
         return@withContext fetchProfile().fold(
             onSuccess = { profile ->
@@ -502,8 +661,6 @@ class XmuAuthClient(
             }
     }
 
-    private data class Quad<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
-
     private class InMemoryCookieJar : CookieJar {
         private val store = ConcurrentHashMap<String, MutableList<Cookie>>()
 
@@ -552,6 +709,7 @@ class XmuAuthClient(
     companion object {
         const val LNT_BASE_URL = "https://lnt.xmu.edu.cn"
         const val SSO_ENTRY_URL = "https://lnt.xmu.edu.cn/login"
+        private const val PREWARM_TTL_MS = 90_000L
         const val MOBILE_UA =
             "Mozilla/5.0 (Linux; Android 15; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 

@@ -33,6 +33,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
 @Immutable
 data class PickedLocalFile(
@@ -104,6 +105,15 @@ class XmuMainViewModel(application: Application) : AndroidViewModel(application)
     val isIndexingSearch: StateFlow<Boolean> = _isIndexingSearch.asStateFlow()
 
     private var remindersEnabled = false
+    private val courseDetailFetchedAt = ConcurrentHashMap<Long, Long>()
+    private val homeworkDetailFetchedAt = ConcurrentHashMap<Long, Long>()
+    @Volatile
+    private var rollcallHistoryFetchedAt: Long = 0L
+
+    companion object {
+        private const val DETAIL_FRESH_TTL_MS = 45_000L
+        private const val HOMEWORK_DETAIL_FRESH_TTL_MS = 30_000L
+    }
 
     fun updateReminderPreference(enabled: Boolean) {
         remindersEnabled = enabled
@@ -145,6 +155,9 @@ class XmuMainViewModel(application: Application) : AndroidViewModel(application)
                 _courseDetails.value = emptyMap()
                 _homeworkDetails.value = emptyMap()
                 _rollcallHistory.value = RollcallHistoryUiState()
+                courseDetailFetchedAt.clear()
+                homeworkDetailFetchedAt.clear()
+                rollcallHistoryFetchedAt = 0L
                 _uiState.value = XmuDashboardState(isDemoMode = true)
             }
 
@@ -168,24 +181,27 @@ class XmuMainViewModel(application: Application) : AndroidViewModel(application)
                         lastSyncText = syncLabel,
                     )
                 }
-                // Warm in-memory courseDetails from offline SQLite cache for instant search
-                val restoredDetails = LinkedHashMap<Long, CourseDetailUiState>()
-                cached.data.courses.forEach { course ->
-                    val detail = cacheStore.getJson(
-                        "course_detail_${course.id}",
-                        CourseDetailCacheSnapshot.serializer(),
-                    )?.data
-                    if (detail != null) {
-                        restoredDetails[course.id] = CourseDetailUiState(
+                // Warm in-memory courseDetails from offline SQLite cache in a single batch query
+                val keyToCourseId = cached.data.courses.associate { "course_detail_${it.id}" to it.id }
+                val cachedDetailMap = cacheStore.getJsonMap(
+                    keys = keyToCourseId.keys.toList(),
+                    serializer = CourseDetailCacheSnapshot.serializer(),
+                )
+                if (cachedDetailMap.isNotEmpty()) {
+                    val restoredDetails = LinkedHashMap<Long, CourseDetailUiState>(cachedDetailMap.size)
+                    cachedDetailMap.forEach { (key, entry) ->
+                        val cid = keyToCourseId[key] ?: return@forEach
+                        val detail = entry.data
+                        restoredDetails[cid] = CourseDetailUiState(
                             isLoading = false,
                             homeworks = detail.homeworks,
                             coursewares = detail.coursewares,
                             bulletins = detail.bulletins,
                         )
                     }
-                }
-                if (restoredDetails.isNotEmpty()) {
-                    _courseDetails.update { it + restoredDetails }
+                    if (restoredDetails.isNotEmpty()) {
+                        _courseDetails.update { it + restoredDetails }
+                    }
                 }
                 publishWidgetSnapshot(
                     isLoggedIn = true,
@@ -211,30 +227,47 @@ class XmuMainViewModel(application: Application) : AndroidViewModel(application)
         val userId = currentUserId ?: return
 
         viewModelScope.launch {
+            val syncStartMs = System.currentTimeMillis()
             _uiState.update { it.copy(isRefreshing = true, errorMessage = null) }
+            courseDetailFetchedAt.clear()
+            homeworkDetailFetchedAt.clear()
+            rollcallHistoryFetchedAt = 0L
             try {
                 coroutineScope {
+                    val preselectedSemesterId = _uiState.value.selectedSemesterId
                     val rollcallsDeferred = async { currentApi.getOngoingRollcalls() }
                     val semestersDeferred = async { currentApi.getMySemesters() }
                     val todosDeferred = async { currentApi.getTodos() }
+                    // Start fetching courses immediately when selectedSemesterId is known (avoid serial waterfall)
+                    val specCoursesDeferred = preselectedSemesterId?.let { semId ->
+                        async { currentApi.getUserCourses(userId = userId, semesterId = semId) }
+                    }
 
                     val semesters = semestersDeferred.await().getOrElse { _uiState.value.semesters }
-                    val targetSemesterId = _uiState.value.selectedSemesterId
+                    val targetSemesterId = preselectedSemesterId
                         ?: semesters.firstOrNull { it.isActive }?.id
                         ?: semesters.firstOrNull()?.id
                     val semesterNames = semesters.associate { it.id to it.name }
 
-                    val courses = currentApi.getUserCourses(
-                        userId = userId,
-                        semesterId = targetSemesterId,
-                        semesterNames = semesterNames,
-                    ).getOrElse { _uiState.value.courses }
+                    val rawCourses = if (specCoursesDeferred != null && targetSemesterId == preselectedSemesterId) {
+                        specCoursesDeferred.await().getOrElse { _uiState.value.courses }
+                    } else {
+                        currentApi.getUserCourses(
+                            userId = userId,
+                            semesterId = targetSemesterId,
+                            semesterNames = semesterNames,
+                        ).getOrElse { _uiState.value.courses }
+                    }
+                    val courses = rawCourses.map { c ->
+                        val label = semesterNames[targetSemesterId]
+                        if (label != null && c.semester == "当前学期") c.copy(semester = label) else c
+                    }
 
                     val todos = todosDeferred.await().getOrElse { emptyList() }
                     val rollcalls = rollcallsDeferred.await().getOrElse { emptyList() }
 
-                    // Fan out homework-activities across courses (bounded concurrency = 5)
-                    val sem = Semaphore(5)
+                    // Fan out homework-activities across courses (matched to OkHttp maxRequestsPerHost=12)
+                    val sem = Semaphore(10)
                     val courseHomeworks = courses.take(15).map { course ->
                         async {
                             sem.withPermit {
@@ -300,9 +333,10 @@ class XmuMainViewModel(application: Application) : AndroidViewModel(application)
                         homeworks = sortedHomeworks,
                         updatedAtText = syncLabel,
                     )
+                    val elapsedMs = System.currentTimeMillis() - syncStartMs
                     DebugLogStore.log(
                         "SYNC",
-                        "semesters=${semesters.size}, courses=${enrichedCourses.size}, homeworks=${sortedHomeworks.size}, rollcalls=${rollcalls.size}",
+                        "semesters=${semesters.size}, courses=${enrichedCourses.size}, homeworks=${sortedHomeworks.size}, rollcalls=${rollcalls.size} in ${elapsedMs}ms",
                     )
                 }
             } catch (e: Exception) {
@@ -346,6 +380,14 @@ class XmuMainViewModel(application: Application) : AndroidViewModel(application)
             return
         }
 
+        val lastFetched = courseDetailFetchedAt[course.id]
+        if (lastFetched != null &&
+            System.currentTimeMillis() - lastFetched < DETAIL_FRESH_TTL_MS &&
+            _courseDetails.value[course.id]?.isLoading == false
+        ) {
+            return
+        }
+
         viewModelScope.launch {
             val cacheKey = "course_detail_${course.id}"
             val cached = cacheStore.getJson(cacheKey, CourseDetailCacheSnapshot.serializer())
@@ -373,6 +415,8 @@ class XmuMainViewModel(application: Application) : AndroidViewModel(application)
                 val cws = cwDeferred.await().getOrElse { cached?.data?.coursewares.orEmpty() }
                 val bls = blDeferred.await().getOrElse { cached?.data?.bulletins.orEmpty() }
 
+                courseDetailFetchedAt[course.id] = System.currentTimeMillis()
+
                 cacheStore.putJson(
                     key = cacheKey,
                     value = CourseDetailCacheSnapshot(homeworks = hws, coursewares = cws, bulletins = bls),
@@ -395,6 +439,15 @@ class XmuMainViewModel(application: Application) : AndroidViewModel(application)
         val currentApi = api ?: return
         val userId = currentUserId ?: return
 
+        val lastFetched = homeworkDetailFetchedAt[homeworkId]
+        if (lastFetched != null &&
+            System.currentTimeMillis() - lastFetched < HOMEWORK_DETAIL_FRESH_TTL_MS &&
+            _homeworkDetails.value[homeworkId]?.detail != null &&
+            _homeworkDetails.value[homeworkId]?.isLoading == false
+        ) {
+            return
+        }
+
         val fallback = _uiState.value.homeworks.find { it.id == homeworkId }
             ?: _homeworkDetails.value[homeworkId]?.detail
 
@@ -408,6 +461,7 @@ class XmuMainViewModel(application: Application) : AndroidViewModel(application)
 
             currentApi.getHomeworkDetail(homeworkId, userId, initial).fold(
                 onSuccess = { rich ->
+                    homeworkDetailFetchedAt[homeworkId] = System.currentTimeMillis()
                     cacheStore.putJson(cacheKey, rich, HomeworkItem.serializer())
                     _homeworkDetails.update { map ->
                         map + (homeworkId to HomeworkDetailUiState(isLoading = false, detail = rich))
@@ -546,6 +600,7 @@ class XmuMainViewModel(application: Application) : AndroidViewModel(application)
         )
         if (submitRes.isSuccess) {
             onProgress(1.0f, "提交成功")
+            homeworkDetailFetchedAt.remove(homeworkId)
             loadHomeworkDetail(homeworkId)
             refreshAll()
         }
@@ -595,7 +650,15 @@ class XmuMainViewModel(application: Application) : AndroidViewModel(application)
         val semesterKey = _uiState.value.selectedSemesterId ?: 0L
         val cacheKey = "rollcall_history_${userId}_$semesterKey"
 
-        if (!forceRefresh && _rollcallHistory.value.isLoading) return
+        if (!forceRefresh) {
+            if (_rollcallHistory.value.isLoading) return
+            if (rollcallHistoryFetchedAt > 0L &&
+                System.currentTimeMillis() - rollcallHistoryFetchedAt < DETAIL_FRESH_TTL_MS &&
+                _rollcallHistory.value.records.isNotEmpty()
+            ) {
+                return
+            }
+        }
 
         viewModelScope.launch {
             val cached = cacheStore.getJson(cacheKey, RollcallHistoryCacheSnapshot.serializer())
@@ -626,7 +689,7 @@ class XmuMainViewModel(application: Application) : AndroidViewModel(application)
                     return@launch
                 }
 
-                val sem = Semaphore(5)
+                val sem = Semaphore(10)
                 val allRecords = coroutineScope {
                     courses.map { course ->
                         async {
@@ -644,6 +707,7 @@ class XmuMainViewModel(application: Application) : AndroidViewModel(application)
                         TimeFormatUtils.parseIsoInstant(it.rollcallTimeIso)?.toEpochMilli() ?: it.id
                     }
 
+                rollcallHistoryFetchedAt = System.currentTimeMillis()
                 cacheStore.putJson(
                     key = cacheKey,
                     value = RollcallHistoryCacheSnapshot(records = sorted),
@@ -715,7 +779,7 @@ class XmuMainViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             _isIndexingSearch.value = true
             try {
-                val sem = Semaphore(4)
+                val sem = Semaphore(6)
                 val existing = _courseDetails.value
                 val targets = courses.filter { existing[it.id] == null }
                 if (targets.isNotEmpty()) {
@@ -724,9 +788,13 @@ class XmuMainViewModel(application: Application) : AndroidViewModel(application)
                             async {
                                 sem.withPermit {
                                     val cacheKey = "course_detail_${course.id}"
-                                    val hws = currentApi.getCourseHomeworks(course.id, course.name).getOrElse { emptyList() }
-                                    val cws = currentApi.getCoursewares(course.id).getOrElse { emptyList() }
-                                    val bls = currentApi.getCourseBulletins(course.id).getOrElse { emptyList() }
+                                    val (hws, cws, bls) = coroutineScope {
+                                        val hwDef = async { currentApi.getCourseHomeworks(course.id, course.name).getOrElse { emptyList() } }
+                                        val cwDef = async { currentApi.getCoursewares(course.id).getOrElse { emptyList() } }
+                                        val blDef = async { currentApi.getCourseBulletins(course.id).getOrElse { emptyList() } }
+                                        Triple(hwDef.await(), cwDef.await(), blDef.await())
+                                    }
+                                    courseDetailFetchedAt[course.id] = System.currentTimeMillis()
                                     cacheStore.putJson(
                                         key = cacheKey,
                                         value = CourseDetailCacheSnapshot(

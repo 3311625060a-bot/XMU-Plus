@@ -82,6 +82,12 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
         _loginUiState.update { it.copy(errorMessage = null) }
     }
 
+    fun prewarmLogin() {
+        viewModelScope.launch {
+            authClient.prewarmSso()
+        }
+    }
+
     fun submitNativeLogin() {
         val state = _loginUiState.value
         val user = state.username.trim()

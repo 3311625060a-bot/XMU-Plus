@@ -104,6 +104,36 @@ class OfflineCacheStore(context: Context) {
             }
         }
 
+    suspend fun <T> getJsonMap(
+        keys: List<String>,
+        serializer: KSerializer<T>,
+    ): Map<String, CachedValue<T>> = withContext(Dispatchers.IO) {
+        if (keys.isEmpty()) return@withContext emptyMap()
+        val placeholders = keys.joinToString(",") { "?" }
+        val result = LinkedHashMap<String, CachedValue<T>>(keys.size)
+        val cursor = dbHelper.readableDatabase.query(
+            TABLE_CACHE,
+            arrayOf(COL_KEY, COL_PAYLOAD, COL_UPDATED_AT),
+            "$COL_KEY IN ($placeholders)",
+            keys.toTypedArray(),
+            null,
+            null,
+            null,
+        )
+        cursor.use { c ->
+            while (c.moveToNext()) {
+                val key = c.getString(0)
+                val payload = c.getString(1)
+                val updatedAt = c.getLong(2)
+                val decoded = runCatching { json.decodeFromString(serializer, payload) }.getOrNull()
+                if (decoded != null) {
+                    result[key] = CachedValue(data = decoded, updatedAtMillis = updatedAt)
+                }
+            }
+        }
+        result
+    }
+
     suspend fun clearAll() = withContext(Dispatchers.IO) {
         dbHelper.writableDatabase.delete(TABLE_CACHE, null, null)
     }

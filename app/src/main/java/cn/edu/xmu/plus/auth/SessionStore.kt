@@ -33,6 +33,10 @@ class SessionStore(private val context: Context) {
 
     fun currentSessionSnapshot(): PersistedSession? = inMemorySession.get()
 
+    fun setMemorySession(session: PersistedSession?) {
+        inMemorySession.set(session)
+    }
+
     suspend fun loadSession(): PersistedSession? {
         inMemorySession.get()?.let { return it }
         val prefs = context.authDataStore.data.first()

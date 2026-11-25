@@ -89,6 +89,7 @@ class MainActivity : ComponentActivity() {
                     onUsernameChange = authViewModel::updateUsername,
                     onPasswordChange = authViewModel::updatePassword,
                     onToggleRememberCredentials = authViewModel::toggleRememberCredentials,
+                    onPrewarmLogin = authViewModel::prewarmLogin,
                     onSubmitNativeLogin = authViewModel::submitNativeLogin,
                     onOpenWebViewDirectly = authViewModel::openWebViewDirectly,
                     onDismissWebView = authViewModel::dismissWebView,

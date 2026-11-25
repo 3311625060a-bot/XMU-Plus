@@ -95,6 +95,7 @@ fun LoginScreen(
     onUsernameChange: (String) -> Unit,
     onPasswordChange: (String) -> Unit,
     onToggleRememberCredentials: (Boolean) -> Unit,
+    onPrewarmLogin: () -> Unit,
     onSubmitNativeLogin: () -> Unit,
     onOpenWebViewDirectly: () -> Unit,
     onDismissWebView: () -> Unit,
@@ -105,6 +106,10 @@ fun LoginScreen(
     var passwordVisible by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
+
+    LaunchedEffect(Unit) {
+        onPrewarmLogin()
+    }
 
     LaunchedEffect(authState) {
         if (authState is AuthState.LoggedIn && !authState.isRefreshing) {
