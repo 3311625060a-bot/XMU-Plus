@@ -48,10 +48,12 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -89,52 +91,22 @@ enum class MainDestination(
     PROFILE("profile", "我的", Icons.Rounded.Person, Icons.Outlined.Person),
 }
 
-@Composable
-fun ExpressiveFloatingNavBar(
-    currentRoute: String?,
+private enum class DockAxis { HORIZONTAL, VERTICAL }
+
+/**
+ * Shared container surface for both Phone bottom dock and Tablet side rail:
+ * unifies Haze liquid-glass refraction, classic solid tint, elevation, and hairline border.
+ */
+private fun Modifier.dockContainerSurface(
     dockStyle: DockStyle,
     hazeState: HazeState,
-    onNavigate: (MainDestination) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val destinations = MainDestination.entries
-    val selectedIndex = destinations.indexOfFirst { it.route == currentRoute }.coerceAtLeast(0)
-    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
-    val bg = MaterialTheme.colorScheme.background
-    val haptic = LocalHapticFeedback.current
-    val hapticsEnabled by rememberUpdatedState(LocalHapticsEnabled.current)
-    val currentOnNavigate by rememberUpdatedState(onNavigate)
-    val touchSlop = LocalViewConfiguration.current.touchSlop
-    val density = LocalDensity.current
-
-    val wrapperModifier = if (dockStyle == DockStyle.CLASSIC) {
-        modifier
-            .fillMaxWidth()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(
-                        Color.Transparent,
-                        bg.copy(alpha = 0.78f),
-                        bg.copy(alpha = 0.96f),
-                    ),
-                ),
-            )
-            .navigationBarsPadding()
-            .padding(horizontal = 26.dp, vertical = 10.dp)
-    } else {
-        modifier
-            .fillMaxWidth()
-            .navigationBarsPadding()
-            .padding(horizontal = 26.dp, vertical = 10.dp)
-    }
-
-    val dockShape = RoundedCornerShape(28.dp)
-    val dockModifier = if (dockStyle == DockStyle.LIQUID_GLASS) {
-        Modifier
-            .fillMaxWidth()
-            .height(56.dp)
-            .shadow(elevation = 14.dp, shape = dockShape, clip = false)
-            .clip(dockShape)
+    shape: Shape,
+    isDark: Boolean,
+): Modifier = composed {
+    if (dockStyle == DockStyle.LIQUID_GLASS) {
+        this
+            .shadow(elevation = 14.dp, shape = shape, clip = false)
+            .clip(shape)
             .hazeEffect(
                 state = hazeState,
                 style = HazeStyle(
@@ -160,14 +132,12 @@ fun ExpressiveFloatingNavBar(
                         MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.28f),
                     ),
                 ),
-                shape = dockShape,
+                shape = shape,
             )
     } else {
-        Modifier
-            .fillMaxWidth()
-            .height(56.dp)
-            .shadow(elevation = 12.dp, shape = dockShape, clip = false)
-            .clip(dockShape)
+        this
+            .shadow(elevation = 12.dp, shape = shape, clip = false)
+            .clip(shape)
             .background(
                 if (isDark) {
                     MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.92f)
@@ -183,15 +153,183 @@ fun ExpressiveFloatingNavBar(
                         MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.24f),
                     ),
                 ),
-                shape = dockShape,
+                shape = shape,
             )
     }
+}
+
+/**
+ * Shared sliding indicator lens for both Phone bottom dock and Tablet side rail.
+ */
+private fun Modifier.dockActiveLensSurface(
+    dockStyle: DockStyle,
+    shape: Shape,
+    isInteracting: Boolean,
+    lensScale: Float,
+    isDark: Boolean,
+): Modifier = composed {
+    val scaled = this.graphicsLayer {
+        scaleX = lensScale
+        scaleY = lensScale
+    }
+    if (dockStyle == DockStyle.LIQUID_GLASS) {
+        scaled
+            .shadow(elevation = if (isInteracting) 8.dp else 3.dp, shape = shape, clip = false)
+            .clip(shape)
+            .background(
+                if (isDark) {
+                    Color.White.copy(alpha = 0.19f)
+                } else {
+                    Color.White.copy(alpha = 0.84f)
+                },
+            )
+            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f))
+            .border(
+                width = 0.9.dp,
+                brush = Brush.verticalGradient(
+                    colors = listOf(
+                        Color.White.copy(alpha = if (isDark) 0.48f else 0.98f),
+                        Color.White.copy(alpha = 0.10f),
+                    ),
+                ),
+                shape = shape,
+            )
+    } else {
+        scaled
+            .clip(shape)
+            .background(MaterialTheme.colorScheme.primaryContainer)
+    }
+}
+
+/**
+ * Unified tap + finger-scrubbing gesture layer (Commit-on-Release) along X or Y axis.
+ */
+private fun Modifier.dockScrubGesture(
+    axis: DockAxis,
+    itemCount: Int,
+    slotSizePx: Float,
+    totalSizePx: Float,
+    onInteractingChange: (Boolean) -> Unit,
+    onDraggingChange: (Boolean) -> Unit,
+    onHoveredIndexChange: (Int?) -> Unit,
+    onDragOffsetChange: (Float) -> Unit,
+    onCommitIndex: (Int) -> Unit,
+): Modifier = composed {
+    val haptic = LocalHapticFeedback.current
+    val hapticsEnabled by rememberUpdatedState(LocalHapticsEnabled.current)
+    val touchSlop = LocalViewConfiguration.current.touchSlop
+    val latestOnCommit by rememberUpdatedState(onCommitIndex)
+
+    this.pointerInput(axis, itemCount, slotSizePx, totalSizePx) {
+        if (slotSizePx <= 0f || itemCount <= 0) return@pointerInput
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false)
+            val downCoord = if (axis == DockAxis.HORIZONTAL) down.position.x else down.position.y
+            onInteractingChange(true)
+            var dragged = false
+            var lastHoveredIdx = (downCoord / slotSizePx).toInt().coerceIn(0, itemCount - 1)
+
+            try {
+                while (true) {
+                    val event = awaitPointerEvent()
+                    val change = event.changes.firstOrNull { it.id == down.id }
+                        ?: event.changes.firstOrNull()
+                        ?: break
+                    val coord = if (axis == DockAxis.HORIZONTAL) change.position.x else change.position.y
+                    if (!change.pressed) {
+                        val finalIdx = (coord / slotSizePx).toInt().coerceIn(0, itemCount - 1)
+                        if (hapticsEnabled) {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        }
+                        latestOnCommit(finalIdx)
+                        break
+                    }
+
+                    if (!dragged && abs(coord - downCoord) > touchSlop) {
+                        dragged = true
+                        onDraggingChange(true)
+                        onHoveredIndexChange(lastHoveredIdx)
+                        if (hapticsEnabled) {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        }
+                    }
+
+                    if (dragged) {
+                        change.consume()
+                        val maxDrag = (totalSizePx - slotSizePx).coerceAtLeast(0f)
+                        val rawTarget = coord - slotSizePx / 2f
+                        val clamped = when {
+                            rawTarget < 0f -> (rawTarget * 0.22f).coerceAtLeast(-10f)
+                            rawTarget > maxDrag -> maxDrag + ((rawTarget - maxDrag) * 0.22f).coerceAtMost(10f)
+                            else -> rawTarget
+                        }
+                        onDragOffsetChange(clamped)
+                        val idx = (coord / slotSizePx).toInt().coerceIn(0, itemCount - 1)
+                        if (idx != lastHoveredIdx) {
+                            lastHoveredIdx = idx
+                            onHoveredIndexChange(idx)
+                            if (hapticsEnabled) {
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            }
+                        }
+                    }
+                }
+            } finally {
+                onDraggingChange(false)
+                onInteractingChange(false)
+                onHoveredIndexChange(null)
+            }
+        }
+    }
+}
+
+@Composable
+fun ExpressiveFloatingNavBar(
+    currentRoute: String?,
+    dockStyle: DockStyle,
+    hazeState: HazeState,
+    onNavigate: (MainDestination) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val destinations = MainDestination.entries
+    val selectedIndex = destinations.indexOfFirst { it.route == currentRoute }.coerceAtLeast(0)
+    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val bg = MaterialTheme.colorScheme.background
+    val density = LocalDensity.current
+
+    val wrapperModifier = if (dockStyle == DockStyle.CLASSIC) {
+        modifier
+            .fillMaxWidth()
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        Color.Transparent,
+                        bg.copy(alpha = 0.78f),
+                        bg.copy(alpha = 0.96f),
+                    ),
+                ),
+            )
+            .navigationBarsPadding()
+            .padding(horizontal = 26.dp, vertical = 10.dp)
+    } else {
+        modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(horizontal = 26.dp, vertical = 10.dp)
+    }
+
+    val dockShape = RoundedCornerShape(28.dp)
 
     Box(
         modifier = wrapperModifier,
         contentAlignment = Alignment.Center,
     ) {
-        Box(modifier = dockModifier) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp)
+                .dockContainerSurface(dockStyle, hazeState, dockShape, isDark),
+        ) {
             BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxSize()
@@ -216,136 +354,40 @@ fun ExpressiveFloatingNavBar(
                     ),
                     label = "dockSpringPx",
                 )
-
                 val activeOffsetPx = if (isDragging) dragOffsetPx else targetSpringOffsetPx
 
-                val lensScaleX by animateFloatAsState(
+                val lensScale by animateFloatAsState(
                     targetValue = if (isInteracting) 1.015f else 1f,
                     animationSpec = spring(
                         dampingRatio = Spring.DampingRatioNoBouncy,
                         stiffness = 860f,
                     ),
-                    label = "lensScaleX",
-                )
-                val lensScaleY by animateFloatAsState(
-                    targetValue = if (isInteracting) 1.015f else 1f,
-                    animationSpec = spring(
-                        dampingRatio = Spring.DampingRatioNoBouncy,
-                        stiffness = 860f,
-                    ),
-                    label = "lensScaleY",
+                    label = "dockLensScale",
                 )
 
                 val pillShape = RoundedCornerShape(26.dp)
-                val pillModifier = if (dockStyle == DockStyle.LIQUID_GLASS) {
-                    Modifier
+                Box(
+                    modifier = Modifier
                         .offset { IntOffset(activeOffsetPx.roundToInt(), 0) }
                         .width(slotWidthDp)
                         .fillMaxHeight()
-                        .graphicsLayer {
-                            scaleX = lensScaleX
-                            scaleY = lensScaleY
-                        }
-                        .shadow(elevation = if (isInteracting) 8.dp else 3.dp, shape = pillShape, clip = false)
-                        .clip(pillShape)
-                        .background(
-                            if (isDark) {
-                                Color.White.copy(alpha = 0.19f)
-                            } else {
-                                Color.White.copy(alpha = 0.84f)
-                            },
-                        )
-                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f))
-                        .border(
-                            width = 0.9.dp,
-                            brush = Brush.verticalGradient(
-                                colors = listOf(
-                                    Color.White.copy(alpha = if (isDark) 0.48f else 0.98f),
-                                    Color.White.copy(alpha = 0.10f),
-                                ),
-                            ),
-                            shape = pillShape,
-                        )
-                } else {
-                    Modifier
-                        .offset { IntOffset(activeOffsetPx.roundToInt(), 0) }
-                        .width(slotWidthDp)
-                        .fillMaxHeight()
-                        .graphicsLayer {
-                            scaleX = lensScaleX
-                            scaleY = lensScaleY
-                        }
-                        .clip(pillShape)
-                        .background(MaterialTheme.colorScheme.primaryContainer)
-                }
-
-                Box(modifier = pillModifier)
+                        .dockActiveLensSurface(dockStyle, pillShape, isInteracting, lensScale, isDark),
+                )
 
                 Row(
                     modifier = Modifier
                         .fillMaxSize()
-                        .pointerInput(destinations.size, slotWidthPx, totalWidthPx) {
-                            awaitEachGesture {
-                                val down = awaitFirstDown(requireUnconsumed = false)
-                                val downX = down.position.x
-                                isInteracting = true
-                                var dragged = false
-                                var lastHoveredIdx = ((downX / slotWidthPx).toInt())
-                                    .coerceIn(0, destinations.lastIndex)
-
-                                try {
-                                    while (true) {
-                                        val event = awaitPointerEvent()
-                                        val change = event.changes.firstOrNull { it.id == down.id }
-                                            ?: event.changes.firstOrNull()
-                                            ?: break
-                                        if (!change.pressed) {
-                                            val finalIdx = ((change.position.x / slotWidthPx).toInt())
-                                                .coerceIn(0, destinations.lastIndex)
-                                            if (hapticsEnabled) {
-                                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                            }
-                                            currentOnNavigate(destinations[finalIdx])
-                                            break
-                                        }
-
-                                        val currentX = change.position.x
-                                        if (!dragged && abs(currentX - downX) > touchSlop) {
-                                            dragged = true
-                                            isDragging = true
-                                            hoveredIndex = lastHoveredIdx
-                                            if (hapticsEnabled) {
-                                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                            }
-                                        }
-
-                                        if (dragged) {
-                                            change.consume()
-                                            val maxDrag = (totalWidthPx - slotWidthPx).coerceAtLeast(0f)
-                                            val rawTarget = currentX - slotWidthPx / 2f
-                                            dragOffsetPx = when {
-                                                rawTarget < 0f -> (rawTarget * 0.22f).coerceAtLeast(-10f)
-                                                rawTarget > maxDrag -> maxDrag + ((rawTarget - maxDrag) * 0.22f).coerceAtMost(10f)
-                                                else -> rawTarget
-                                            }
-                                            val idx = ((currentX / slotWidthPx).toInt())
-                                                .coerceIn(0, destinations.lastIndex)
-                                            if (idx != lastHoveredIdx) {
-                                                lastHoveredIdx = idx
-                                                hoveredIndex = idx
-                                                if (hapticsEnabled) {
-                                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                                }
-                                            }
-                                        }
-                                    }
-                                } finally {
-                                    isDragging = false
-                                    isInteracting = false
-                                    hoveredIndex = null
-                                }
-                            }
-                        },
+                        .dockScrubGesture(
+                            axis = DockAxis.HORIZONTAL,
+                            itemCount = destinations.size,
+                            slotSizePx = slotWidthPx,
+                            totalSizePx = totalWidthPx,
+                            onInteractingChange = { isInteracting = it },
+                            onDraggingChange = { isDragging = it },
+                            onHoveredIndexChange = { hoveredIndex = it },
+                            onDragOffsetChange = { dragOffsetPx = it },
+                            onCommitIndex = { onNavigate(destinations[it]) },
+                        ),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     destinations.forEachIndexed { index, dest ->
@@ -416,59 +458,12 @@ fun ExpressiveTabletNavigationRail(
     modifier: Modifier = Modifier,
 ) {
     val destinations = MainDestination.entries
+    val selectedIndex = destinations.indexOfFirst { it.route == currentRoute }.coerceAtLeast(0)
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val density = LocalDensity.current
     val railShape = RoundedCornerShape(28.dp)
-
-    val containerModifier = if (dockStyle == DockStyle.LIQUID_GLASS) {
-        Modifier
-            .width(86.dp)
-            .fillMaxHeight()
-            .clip(railShape)
-            .hazeEffect(
-                state = hazeState,
-                style = HazeStyle(
-                    backgroundColor = MaterialTheme.colorScheme.surface,
-                    tint = HazeTint(
-                        if (isDark) {
-                            MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.42f)
-                        } else {
-                            Color.White.copy(alpha = 0.52f)
-                        },
-                    ),
-                    blurRadius = 20.dp,
-                    noiseFactor = 0.04f,
-                ),
-            ) {
-                inputScale = HazeInputScale.Auto
-            }
-            .border(
-                width = 1.dp,
-                brush = Brush.verticalGradient(
-                    colors = listOf(
-                        Color.White.copy(alpha = if (isDark) 0.28f else 0.90f),
-                        MaterialTheme.colorScheme.primary.copy(alpha = 0.22f),
-                    ),
-                ),
-                shape = railShape,
-            )
-    } else {
-        Modifier
-            .width(86.dp)
-            .fillMaxHeight()
-            .clip(railShape)
-            .background(
-                if (isDark) {
-                    MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.94f)
-                } else {
-                    MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = 0.96f)
-                },
-            )
-            .border(
-                width = 0.75.dp,
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.22f),
-                shape = railShape,
-            )
-    }
+    val slotHeightDp = 58.dp
+    val trackHeightDp = slotHeightDp * destinations.size
 
     Box(
         modifier = modifier
@@ -477,11 +472,13 @@ fun ExpressiveTabletNavigationRail(
             .padding(start = 14.dp, top = 12.dp, bottom = 12.dp),
     ) {
         Column(
-            modifier = containerModifier
+            modifier = Modifier
+                .width(82.dp)
+                .fillMaxHeight()
+                .dockContainerSurface(dockStyle, hazeState, railShape, isDark)
                 .verticalScroll(rememberScrollState())
-                .padding(vertical = 12.dp, horizontal = 8.dp),
+                .padding(vertical = 12.dp, horizontal = 5.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Box(
                 modifier = Modifier
@@ -496,48 +493,123 @@ fun ExpressiveTabletNavigationRail(
                     color = MaterialTheme.colorScheme.onPrimaryContainer,
                 )
             }
-            Spacer(modifier = Modifier.height(2.dp))
-            destinations.forEach { dest ->
-                val isSelected = currentRoute == dest.route
-                val itemBg by animateColorAsState(
-                    targetValue = if (isSelected) {
-                        MaterialTheme.colorScheme.primaryContainer
-                    } else {
-                        Color.Transparent
-                    },
-                    label = "railBg",
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Vertical sliding glass lens + scrubbing gesture track (matches bottom dock fluid motion)
+            BoxWithConstraints(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(trackHeightDp),
+            ) {
+                val resolvedSlotDp = maxHeight / destinations.size
+                val slotHeightPx = with(density) { resolvedSlotDp.toPx() }
+                val totalHeightPx = with(density) { maxHeight.toPx() }
+
+                var isInteracting by remember { mutableStateOf(false) }
+                var isDragging by remember { mutableStateOf(false) }
+                var hoveredIndex by remember { mutableStateOf<Int?>(null) }
+                var dragOffsetPx by remember { mutableFloatStateOf(0f) }
+
+                val visualIndex = hoveredIndex ?: selectedIndex
+
+                val targetSpringOffsetPx by animateFloatAsState(
+                    targetValue = slotHeightPx * visualIndex,
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioNoBouncy,
+                        stiffness = 780f,
+                    ),
+                    label = "railSpringPx",
                 )
-                val itemFg by animateColorAsState(
-                    targetValue = if (isSelected) {
-                        MaterialTheme.colorScheme.onPrimaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                    label = "railFg",
+                val activeOffsetPx = if (isDragging) dragOffsetPx else targetSpringOffsetPx
+
+                val lensScale by animateFloatAsState(
+                    targetValue = if (isInteracting) 1.02f else 1f,
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioNoBouncy,
+                        stiffness = 860f,
+                    ),
+                    label = "railLensScale",
                 )
+
+                val pillShape = RoundedCornerShape(22.dp)
+                Box(
+                    modifier = Modifier
+                        .offset { IntOffset(0, activeOffsetPx.roundToInt()) }
+                        .fillMaxWidth()
+                        .height(resolvedSlotDp)
+                        .dockActiveLensSurface(dockStyle, pillShape, isInteracting, lensScale, isDark),
+                )
+
                 Column(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(itemBg)
-                        .bounceClickable(pressedScale = 0.94f) { onNavigate(dest) }
-                        .padding(vertical = 8.dp),
+                        .fillMaxSize()
+                        .dockScrubGesture(
+                            axis = DockAxis.VERTICAL,
+                            itemCount = destinations.size,
+                            slotSizePx = slotHeightPx,
+                            totalSizePx = totalHeightPx,
+                            onInteractingChange = { isInteracting = it },
+                            onDraggingChange = { isDragging = it },
+                            onHoveredIndexChange = { hoveredIndex = it },
+                            onDragOffsetChange = { dragOffsetPx = it },
+                            onCommitIndex = { onNavigate(destinations[it]) },
+                        ),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    Icon(
-                        imageVector = if (isSelected) dest.selectedIcon else dest.unselectedIcon,
-                        contentDescription = dest.label,
-                        tint = itemFg,
-                        modifier = Modifier.size(22.dp),
-                    )
-                    Spacer(modifier = Modifier.height(3.dp))
-                    Text(
-                        text = dest.label,
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                        ),
-                        color = itemFg,
-                    )
+                    destinations.forEachIndexed { index, dest ->
+                        val isActiveVisual = index == visualIndex
+                        val contentColor by animateColorAsState(
+                            targetValue = if (isActiveVisual) {
+                                if (dockStyle == DockStyle.LIQUID_GLASS) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                }
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            animationSpec = spring(stiffness = Spring.StiffnessMedium),
+                            label = "railContentColor",
+                        )
+                        val iconScale by animateFloatAsState(
+                            targetValue = if (isActiveVisual) 1.05f else 1.0f,
+                            animationSpec = spring(
+                                dampingRatio = Spring.DampingRatioNoBouncy,
+                                stiffness = 820f,
+                            ),
+                            label = "railIconScale",
+                        )
+
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                        ) {
+                            Icon(
+                                imageVector = if (isActiveVisual) dest.selectedIcon else dest.unselectedIcon,
+                                contentDescription = dest.label,
+                                tint = contentColor,
+                                modifier = Modifier
+                                    .size(20.dp)
+                                    .graphicsLayer {
+                                        scaleX = iconScale
+                                        scaleY = iconScale
+                                    },
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = dest.label,
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontWeight = if (isActiveVisual) FontWeight.SemiBold else FontWeight.Medium,
+                                ),
+                                color = contentColor,
+                                maxLines = 1,
+                            )
+                        }
+                    }
                 }
             }
         }
