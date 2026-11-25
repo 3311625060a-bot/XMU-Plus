@@ -9,18 +9,24 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import cn.edu.xmu.plus.auth.AuthViewModel
+import cn.edu.xmu.plus.data.AppUpdateChecker
 import cn.edu.xmu.plus.data.DarkModePreference
 import cn.edu.xmu.plus.data.ThemePreferencesRepository
 import cn.edu.xmu.plus.data.ThemeSettings
+import cn.edu.xmu.plus.data.UpdateCheckResult
 import cn.edu.xmu.plus.data.XmuMainViewModel
 import cn.edu.xmu.plus.debug.DebugLogStore
 import cn.edu.xmu.plus.ui.XmuPlusApp
 import cn.edu.xmu.plus.ui.theme.XmuPlusTheme
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -42,6 +48,18 @@ class MainActivity : ComponentActivity() {
             val rollcallHistory by mainViewModel.rollcallHistory.collectAsStateWithLifecycle()
             val isIndexingSearch by mainViewModel.isIndexingSearch.collectAsStateWithLifecycle()
             val scope = rememberCoroutineScope()
+            var startupUpdateAvailable by remember { mutableStateOf<UpdateCheckResult.UpdateAvailable?>(null) }
+
+            LaunchedEffect(Unit) {
+                delay(2200L)
+                val persisted = repo.themeSettings.first()
+                if (persisted.autoCheckUpdatesEnabled) {
+                    val res = AppUpdateChecker.checkForUpdate(BuildConfig.VERSION_NAME)
+                    if (res is UpdateCheckResult.UpdateAvailable) {
+                        startupUpdateAvailable = res
+                    }
+                }
+            }
 
             LaunchedEffect(settings.debugModeEnabled) {
                 DebugLogStore.setEnabled(settings.debugModeEnabled)
@@ -145,9 +163,14 @@ class MainActivity : ComponentActivity() {
                     onToggleDdlReminder = { enabled ->
                         scope.launch { repo.setDdlReminderEnabled(enabled) }
                     },
+                    onToggleAutoCheckUpdates = { enabled ->
+                        scope.launch { repo.setAutoCheckUpdatesEnabled(enabled) }
+                    },
                     onToggleDebugMode = { enabled ->
                         scope.launch { repo.setDebugModeEnabled(enabled) }
                     },
+                    startupUpdateAvailable = startupUpdateAvailable,
+                    onDismissStartupUpdate = { startupUpdateAvailable = null },
                 )
             }
         }

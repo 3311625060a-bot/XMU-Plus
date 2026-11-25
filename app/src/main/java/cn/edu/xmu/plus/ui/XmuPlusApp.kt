@@ -1,6 +1,7 @@
 package cn.edu.xmu.plus.ui
 
 import android.net.Uri
+import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
@@ -21,8 +22,11 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
@@ -32,6 +36,9 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -52,6 +59,7 @@ import cn.edu.xmu.plus.data.HomeworkDetailUiState
 import cn.edu.xmu.plus.data.PickedLocalFile
 import cn.edu.xmu.plus.data.RollcallHistoryUiState
 import cn.edu.xmu.plus.data.ThemeSettings
+import cn.edu.xmu.plus.data.UpdateCheckResult
 import cn.edu.xmu.plus.data.XmuDashboardState
 import cn.edu.xmu.plus.network.CheckInApiResult
 import cn.edu.xmu.plus.ui.components.ExpressiveFloatingNavBar
@@ -145,7 +153,10 @@ fun XmuPlusApp(
     onToggleFilmGrain: (Boolean) -> Unit,
     onToggleSharedElement: (Boolean) -> Unit,
     onToggleDdlReminder: (Boolean) -> Unit,
+    onToggleAutoCheckUpdates: (Boolean) -> Unit,
     onToggleDebugMode: (Boolean) -> Unit,
+    startupUpdateAvailable: UpdateCheckResult.UpdateAvailable? = null,
+    onDismissStartupUpdate: () -> Unit = {},
 ) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
@@ -454,6 +465,7 @@ fun XmuPlusApp(
                                     onToggleFilmGrain = onToggleFilmGrain,
                                     onToggleSharedElement = onToggleSharedElement,
                                     onToggleDdlReminder = onToggleDdlReminder,
+                                    onToggleAutoCheckUpdates = onToggleAutoCheckUpdates,
                                     onToggleDebugMode = onToggleDebugMode,
                                     onBack = { navController.popBackStack() },
                                 )
@@ -525,6 +537,51 @@ fun XmuPlusApp(
             onRefreshRollcalls = onRefreshRollcalls,
             onSubmitPasscode = onSubmitPasscodeCheckIn,
             onDismiss = { showPasscodeSheet = false },
+        )
+    }
+
+    if (startupUpdateAvailable != null) {
+        val context = LocalContext.current
+        val uriHandler = LocalUriHandler.current
+        val downloadTarget = startupUpdateAvailable.apkDownloadUrl ?: startupUpdateAvailable.releasePageUrl
+        AlertDialog(
+            onDismissRequest = onDismissStartupUpdate,
+            title = {
+                Text(
+                    text = buildString {
+                        append("发现新版本 ${startupUpdateAvailable.latestVersion}")
+                        if (startupUpdateAvailable.isPreRelease) append(" (Preview)")
+                    },
+                )
+            },
+            text = {
+                Text(
+                    text = startupUpdateAvailable.releaseNotes.ifBlank {
+                        "GitHub Releases 已发布新版本 ${startupUpdateAvailable.releaseTitle}，点击前往下载更新。"
+                    }.take(320),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 8,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            },
+            dismissButton = {
+                TextButton(onClick = onDismissStartupUpdate) {
+                    Text("暂不更新")
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        runCatching { uriHandler.openUri(downloadTarget) }.onFailure {
+                            Toast.makeText(context, "无法打开更新链接", Toast.LENGTH_SHORT).show()
+                        }
+                        onDismissStartupUpdate()
+                    },
+                ) {
+                    Text(if (startupUpdateAvailable.apkDownloadUrl != null) "下载更新" else "查看发布页")
+                }
+            },
         )
     }
 }

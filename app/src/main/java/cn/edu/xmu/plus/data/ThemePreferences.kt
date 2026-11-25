@@ -82,6 +82,7 @@ data class ThemeSettings(
     val filmGrainEnabled: Boolean = false,
     val sharedElementEnabled: Boolean = false,
     val ddlReminderEnabled: Boolean = false,
+    val autoCheckUpdatesEnabled: Boolean = true,
     val debugModeEnabled: Boolean = false,
 )
 
@@ -95,6 +96,7 @@ class ThemePreferencesRepository(private val context: Context) {
         val FILM_GRAIN_ENABLED = booleanPreferencesKey("film_grain_enabled")
         val SHARED_ELEMENT_ENABLED = booleanPreferencesKey("shared_element_enabled")
         val DDL_REMINDER_ENABLED = booleanPreferencesKey("ddl_reminder_enabled")
+        val AUTO_CHECK_UPDATES_ENABLED = booleanPreferencesKey("auto_check_updates_enabled")
         val DEBUG_MODE_ENABLED = booleanPreferencesKey("debug_mode_enabled")
     }
 
@@ -110,6 +112,7 @@ class ThemePreferencesRepository(private val context: Context) {
             filmGrainEnabled = prefs[Keys.FILM_GRAIN_ENABLED] ?: false,
             sharedElementEnabled = prefs[Keys.SHARED_ELEMENT_ENABLED] ?: false,
             ddlReminderEnabled = prefs[Keys.DDL_REMINDER_ENABLED] ?: false,
+            autoCheckUpdatesEnabled = prefs[Keys.AUTO_CHECK_UPDATES_ENABLED] ?: true,
             debugModeEnabled = prefs[Keys.DEBUG_MODE_ENABLED] ?: false,
         )
     }
@@ -153,6 +156,12 @@ class ThemePreferencesRepository(private val context: Context) {
     suspend fun setDdlReminderEnabled(enabled: Boolean) {
         context.themeDataStore.edit { prefs ->
             prefs[Keys.DDL_REMINDER_ENABLED] = enabled
+        }
+    }
+
+    suspend fun setAutoCheckUpdatesEnabled(enabled: Boolean) {
+        context.themeDataStore.edit { prefs ->
+            prefs[Keys.AUTO_CHECK_UPDATES_ENABLED] = enabled
         }
     }
 

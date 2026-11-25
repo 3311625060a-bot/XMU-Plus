@@ -42,6 +42,7 @@ import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.DynamicFeed
 import androidx.compose.material.icons.rounded.Grain
 import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material.icons.rounded.TabletAndroid
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.Vibration
@@ -104,6 +105,7 @@ fun SettingsScreen(
     onToggleFilmGrain: (Boolean) -> Unit,
     onToggleSharedElement: (Boolean) -> Unit,
     onToggleDdlReminder: (Boolean) -> Unit,
+    onToggleAutoCheckUpdates: (Boolean) -> Unit,
     onToggleDebugMode: (Boolean) -> Unit,
     onBack: () -> Unit,
 ) {
@@ -410,6 +412,33 @@ fun SettingsScreen(
                                                 onToggleDdlReminder(true)
                                             }
                                         },
+                                    )
+                                }
+
+                                FrostedHairlineDivider(startIndent = 52.dp)
+
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.SystemUpdate,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                    )
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("启动时自动检测更新", style = MaterialTheme.typography.titleSmall)
+                                        Text(
+                                            text = "冷启动后台检查 GitHub Releases 新版本（关闭后仍可在关于页手动检测）",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    FrostedToggleSwitch(
+                                        checked = settings.autoCheckUpdatesEnabled,
+                                        onCheckedChange = onToggleAutoCheckUpdates,
                                     )
                                 }
 
