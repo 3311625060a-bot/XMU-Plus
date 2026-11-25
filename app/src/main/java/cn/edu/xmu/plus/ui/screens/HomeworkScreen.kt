@@ -33,7 +33,12 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Sort
 import androidx.compose.material.icons.rounded.AttachFile
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
@@ -60,6 +65,7 @@ import cn.edu.xmu.plus.data.HomeworkDetailUiState
 import cn.edu.xmu.plus.data.HomeworkItem
 import cn.edu.xmu.plus.data.HomeworkStatus
 import cn.edu.xmu.plus.data.PickedLocalFile
+import cn.edu.xmu.plus.data.TimeFormatUtils
 import cn.edu.xmu.plus.data.XmuDashboardState
 import cn.edu.xmu.plus.ui.components.AmbientGlowBackground
 import cn.edu.xmu.plus.ui.components.ExpressiveGlidingSegmentedBar
@@ -72,6 +78,57 @@ enum class HomeworkFilter(val label: String) {
     PENDING("待提交"),
     SUBMITTED("已提交"),
     GRADED("已批改"),
+}
+
+enum class HomeworkSortOrder(val label: String, val shortLabel: String) {
+    PENDING_FIRST("待交优先 · 紧迫度排序", "待交优先"),
+    DEADLINE_ASC("截止时间 · 最早优先", "截止最早"),
+    DEADLINE_DESC("截止时间 · 最新优先", "最新截止"),
+    BY_COURSE("课程名称 · 分组排序", "按课程"),
+}
+
+private fun sortHomeworks(
+    items: List<HomeworkItem>,
+    order: HomeworkSortOrder,
+): List<HomeworkItem> {
+    if (items.size <= 1) return items
+    fun deadlineMillisAsc(item: HomeworkItem): Long =
+        TimeFormatUtils.parseIsoInstant(item.endTimeIso)?.toEpochMilli() ?: Long.MAX_VALUE
+
+    fun deadlineMillisDesc(item: HomeworkItem): Long =
+        TimeFormatUtils.parseIsoInstant(item.endTimeIso)?.toEpochMilli() ?: Long.MIN_VALUE
+
+    return when (order) {
+        HomeworkSortOrder.PENDING_FIRST -> items.sortedWith(
+            compareBy<HomeworkItem>(
+                { it.status.ordinal },
+                { it.urgency.ordinal },
+                { deadlineMillisAsc(it) },
+                { it.id },
+            ),
+        )
+        HomeworkSortOrder.DEADLINE_ASC -> items.sortedWith(
+            compareBy<HomeworkItem>(
+                { deadlineMillisAsc(it) },
+                { it.urgency.ordinal },
+                { it.status.ordinal },
+                { it.id },
+            ),
+        )
+        HomeworkSortOrder.DEADLINE_DESC -> items.sortedWith(
+            compareByDescending<HomeworkItem> { deadlineMillisDesc(it) }
+                .thenBy { it.status.ordinal }
+                .thenBy { it.id },
+        )
+        HomeworkSortOrder.BY_COURSE -> items.sortedWith(
+            compareBy<HomeworkItem>(
+                { it.courseName },
+                { it.status.ordinal },
+                { deadlineMillisAsc(it) },
+                { it.id },
+            ),
+        )
+    }
 }
 
 @kotlin.OptIn(
@@ -96,14 +153,17 @@ fun HomeworkScreen(
     onSubmitHomework: suspend (Long, String, List<PickedLocalFile>, Long?, (Float, String) -> Unit) -> Result<Unit>,
 ) {
     val pullState = rememberPullToRefreshState()
+    var sortOrder by remember { mutableStateOf(HomeworkSortOrder.PENDING_FIRST) }
+    var sortMenuExpanded by remember { mutableStateOf(false) }
 
-    val filtered = remember(selectedFilter, dashboardState.homeworks) {
-        when (selectedFilter) {
+    val filtered = remember(selectedFilter, sortOrder, dashboardState.homeworks) {
+        val subset = when (selectedFilter) {
             HomeworkFilter.ALL -> dashboardState.homeworks
             HomeworkFilter.PENDING -> dashboardState.homeworks.filter { it.status == HomeworkStatus.PENDING }
             HomeworkFilter.SUBMITTED -> dashboardState.homeworks.filter { it.status == HomeworkStatus.SUBMITTED }
             HomeworkFilter.GRADED -> dashboardState.homeworks.filter { it.status == HomeworkStatus.GRADED }
         }
+        sortHomeworks(subset, sortOrder)
     }
 
     var tabletSelectedId by remember { mutableStateOf<Long?>(null) }
@@ -142,21 +202,99 @@ fun HomeworkScreen(
                         .fillMaxSize()
                         .statusBarsPadding(),
                 ) {
-                    Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp)) {
-                        Text(
-                            text = "作业中心",
-                            style = MaterialTheme.typography.headlineMedium,
-                            color = MaterialTheme.colorScheme.onBackground,
-                        )
-                        Text(
-                            text = if (dashboardState.isDemoMode) {
-                                "演示数据 · 支持筛选栏左右滑动与卡片展开"
-                            } else {
-                                "共 ${dashboardState.homeworks.size} 项作业 · 下拉刷新同步最新截止时间"
-                            },
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "作业中心",
+                                style = MaterialTheme.typography.headlineMedium,
+                                color = MaterialTheme.colorScheme.onBackground,
+                            )
+                            Text(
+                                text = if (dashboardState.isDemoMode) {
+                                    "演示数据 · 支持筛选与排序切换"
+                                } else {
+                                    "共 ${dashboardState.homeworks.size} 项 · ${sortOrder.shortLabel}"
+                                },
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Box {
+                            Surface(
+                                shape = CircleShape,
+                                color = MaterialTheme.colorScheme.surfaceContainer,
+                                border = BorderStroke(0.8.dp, MaterialTheme.colorScheme.outlineVariant),
+                                modifier = Modifier.bounceClickable { sortMenuExpanded = true },
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Rounded.Sort,
+                                        contentDescription = "排序方式",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                    Spacer(modifier = Modifier.width(5.dp))
+                                    Text(
+                                        text = sortOrder.shortLabel,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                    Spacer(modifier = Modifier.width(2.dp))
+                                    Icon(
+                                        imageVector = Icons.Rounded.KeyboardArrowDown,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(15.dp),
+                                    )
+                                }
+                            }
+
+                            DropdownMenu(
+                                expanded = sortMenuExpanded,
+                                onDismissRequest = { sortMenuExpanded = false },
+                            ) {
+                                HomeworkSortOrder.entries.forEach { option ->
+                                    val isCurrent = option == sortOrder
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                text = option.label,
+                                                fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
+                                                color = if (isCurrent) {
+                                                    MaterialTheme.colorScheme.primary
+                                                } else {
+                                                    MaterialTheme.colorScheme.onSurface
+                                                },
+                                            )
+                                        },
+                                        leadingIcon = {
+                                            if (isCurrent) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.Check,
+                                                    contentDescription = null,
+                                                    tint = MaterialTheme.colorScheme.primary,
+                                                    modifier = Modifier.size(18.dp),
+                                                )
+                                            }
+                                        },
+                                        onClick = {
+                                            sortOrder = option
+                                            sortMenuExpanded = false
+                                        },
+                                    )
+                                }
+                            }
+                        }
                     }
 
                     ExpressiveGlidingSegmentedBar(
@@ -171,7 +309,7 @@ fun HomeworkScreen(
                     Spacer(modifier = Modifier.height(14.dp))
 
                     AnimatedContent(
-                        targetState = selectedFilter,
+                        targetState = selectedFilter to sortOrder,
                         transitionSpec = {
                             fadeIn(tween(110)) togetherWith fadeOut(tween(80))
                         },
@@ -180,14 +318,15 @@ fun HomeworkScreen(
                             .fillMaxWidth()
                             .clipToBounds(),
                         label = "hwFilterTab",
-                    ) { tabFilter ->
-                        val tabFiltered = remember(tabFilter, dashboardState.homeworks) {
-                            when (tabFilter) {
+                    ) { (tabFilter, tabSort) ->
+                        val tabFiltered = remember(tabFilter, tabSort, dashboardState.homeworks) {
+                            val subset = when (tabFilter) {
                                 HomeworkFilter.ALL -> dashboardState.homeworks
                                 HomeworkFilter.PENDING -> dashboardState.homeworks.filter { it.status == HomeworkStatus.PENDING }
                                 HomeworkFilter.SUBMITTED -> dashboardState.homeworks.filter { it.status == HomeworkStatus.SUBMITTED }
                                 HomeworkFilter.GRADED -> dashboardState.homeworks.filter { it.status == HomeworkStatus.GRADED }
                             }
+                            sortHomeworks(subset, tabSort)
                         }
                         val tabListState = rememberLazyListState()
 

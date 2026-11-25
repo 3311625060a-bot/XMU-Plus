@@ -8,11 +8,17 @@ import android.graphics.BitmapFactory
 import android.graphics.Color as AndroidColor
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
+import android.net.http.SslError
 import android.os.ParcelFileDescriptor
+import android.view.ViewGroup
+import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
+import android.webkit.SslErrorHandler
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -81,18 +87,22 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
+import cn.edu.xmu.plus.auth.XmuAuthClient
 import cn.edu.xmu.plus.data.AttachmentPreviewInfo
 import cn.edu.xmu.plus.data.TimeFormatUtils
+import cn.edu.xmu.plus.debug.DebugLogStore
 import cn.edu.xmu.plus.ui.components.ExpressiveGlidingSegmentedBar
 import cn.edu.xmu.plus.ui.components.FrostedGlassCard
 import cn.edu.xmu.plus.ui.components.FrostedIconButton
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -694,6 +704,27 @@ private fun NativePdfViewer(file: File) {
     }
 }
 
+private class ViewerJsBridge(
+    private val onReadyCallback: () -> Unit,
+    private val onErrorCallback: (String) -> Unit,
+    private val onBlankCallback: (String) -> Unit,
+) {
+    @JavascriptInterface
+    fun onReady() {
+        onReadyCallback()
+    }
+
+    @JavascriptInterface
+    fun onError(message: String?) {
+        onErrorCallback(message?.ifBlank { null } ?: "在线预览组件初始化失败")
+    }
+
+    @JavascriptInterface
+    fun onBlankDetected(reason: String?) {
+        onBlankCallback(reason?.ifBlank { null } ?: "页面未渲染可见内容")
+    }
+}
+
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 private fun OnlineDocumentWebView(
@@ -707,18 +738,94 @@ private fun OnlineDocumentWebView(
     var progress by remember { mutableIntStateOf(15) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var webError by remember { mutableStateOf<String?>(null) }
+    var sdkReady by remember { mutableStateOf(false) }
+    var useWpsIframeFallback by remember(previewUrl, aliyunTokenJson) { mutableStateOf(false) }
+    val uriHandler = LocalUriHandler.current
+    val context = LocalContext.current
 
     LaunchedEffect(Unit) {
         onSyncCookies()
+    }
+
+    // Watchdog: if page never renders anything meaningful within 12s, surface clear fallback instead of blank white screen
+    LaunchedEffect(previewUrl, aliyunTokenJson, useWpsIframeFallback, webError) {
+        if (webError != null || sdkReady) return@LaunchedEffect
+        delay(12_000L)
+        if (!sdkReady && webError == null) {
+            webViewRef?.evaluateJavascript(
+                """
+                (function() {
+                    var body = document.body;
+                    var textLen = body ? (body.innerText || '').trim().length : 0;
+                    var hasMedia = !!document.querySelector('iframe,canvas,svg,img,embed,object,video');
+                    return textLen + ':' + (hasMedia ? 1 : 0);
+                })();
+                """.trimIndent(),
+            ) { raw ->
+                val cleaned = raw?.trim('"', ' ', '\n').orEmpty()
+                val parts = cleaned.split(':')
+                val textLen = parts.getOrNull(0)?.toIntOrNull() ?: 0
+                val hasMedia = parts.getOrNull(1) == "1"
+                DebugLogStore.log("VIEWER", "online watchdog check textLen=$textLen hasMedia=$hasMedia iframeMode=$useWpsIframeFallback")
+                if (textLen < 8 && !hasMedia) {
+                    if (aliyunTokenJson.isNullOrBlank() && !previewUrl.isNullOrBlank() && !useWpsIframeFallback) {
+                        useWpsIframeFallback = true
+                        progress = 20
+                    } else {
+                        webError = "在线预览长时间无响应（页面内容为空），可切回原生阅读或用系统浏览器打开"
+                    }
+                }
+            }
+        }
     }
 
     DisposableEffect(Unit) {
         onDispose {
             webViewRef?.apply {
                 stopLoading()
+                removeJavascriptInterface("XmuViewerBridge")
                 destroy()
             }
             webViewRef = null
+        }
+    }
+
+    val loadIntoWebView: (WebView, Boolean) -> Unit = { wv, iframeMode ->
+        onSyncCookies()
+        val hostPrefix = previewUrl?.let { raw ->
+            runCatching {
+                val u = Uri.parse(raw)
+                val sch = u.scheme
+                val h = u.host
+                if (!sch.isNullOrBlank() && !h.isNullOrBlank()) "$sch://$h" else null
+            }.getOrNull()
+        }
+        val extraHeaders = mapOf("Referer" to "https://c-mobile.xmu.edu.cn/")
+        DebugLogStore.log("VIEWER", "loadOnline aliyun=${!aliyunTokenJson.isNullOrBlank()} host=$hostPrefix iframeMode=$iframeMode")
+
+        if (!aliyunTokenJson.isNullOrBlank()) {
+            val html = buildAliyunOfficeHtml(aliyunTokenJson)
+            if (html != null) {
+                wv.loadDataWithBaseURL("https://c-mobile.xmu.edu.cn/", html, "text/html", "UTF-8", null)
+            } else if (!previewUrl.isNullOrBlank()) {
+                wv.loadUrl(previewUrl, extraHeaders)
+            } else {
+                webError = "未获取到在线预览地址"
+            }
+        } else if (!previewUrl.isNullOrBlank()) {
+            if (iframeMode) {
+                wv.loadDataWithBaseURL(
+                    "https://c-mobile.xmu.edu.cn/",
+                    buildWpsIframeHostHtml(previewUrl),
+                    "text/html",
+                    "UTF-8",
+                    null,
+                )
+            } else {
+                wv.loadUrl(previewUrl, extraHeaders)
+            }
+        } else {
+            webError = "未获取到在线预览地址"
         }
     }
 
@@ -738,18 +845,65 @@ private fun OnlineDocumentWebView(
                     onSyncCookies()
                     WebView(ctx).apply {
                         webViewRef = this
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                        )
+                        setBackgroundColor(AndroidColor.TRANSPARENT)
+                        CookieManager.getInstance().setAcceptCookie(true)
                         CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
-                        settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                        settings.databaseEnabled = true
+                        settings.javaScriptCanOpenWindowsAutomatically = true
+                        settings.allowFileAccess = true
+                        settings.allowContentAccess = true
+                        settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                        settings.userAgentString = XmuAuthClient.MOBILE_UA
                         settings.builtInZoomControls = true
                         settings.displayZoomControls = false
                         settings.useWideViewPort = true
                         settings.loadWithOverviewMode = true
 
+                        addJavascriptInterface(
+                            ViewerJsBridge(
+                                onReadyCallback = {
+                                    post {
+                                        sdkReady = true
+                                        progress = 100
+                                    }
+                                },
+                                onErrorCallback = { msg ->
+                                    post {
+                                        DebugLogStore.log("VIEWER", "JS bridge error: $msg", "ERR")
+                                        webError = msg
+                                    }
+                                },
+                                onBlankCallback = { reason ->
+                                    post {
+                                        DebugLogStore.log("VIEWER", "blank detected: $reason iframeMode=$useWpsIframeFallback", "WARN")
+                                        if (aliyunTokenJson.isNullOrBlank() && !previewUrl.isNullOrBlank() && !useWpsIframeFallback) {
+                                            useWpsIframeFallback = true
+                                            progress = 20
+                                        } else {
+                                            webError = "在线预览未能渲染文档内容（$reason），建议切回原生阅读或用系统浏览器打开"
+                                        }
+                                    }
+                                },
+                            ),
+                            "XmuViewerBridge",
+                        )
+
                         webChromeClient = object : WebChromeClient() {
                             override fun onProgressChanged(view: WebView?, newProgress: Int) {
                                 progress = newProgress
+                            }
+
+                            override fun onConsoleMessage(cm: ConsoleMessage?): Boolean {
+                                if (cm != null && cm.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
+                                    DebugLogStore.log("VIEWER", "console.error: ${cm.message()}", "WARN")
+                                }
+                                return super.onConsoleMessage(cm)
                             }
                         }
                         webViewClient = object : WebViewClient() {
@@ -758,30 +912,80 @@ private fun OnlineDocumentWebView(
                                 return scheme !in setOf("http", "https")
                             }
 
+                            override fun onPageFinished(view: WebView?, url: String?) {
+                                super.onPageFinished(view, url)
+                                progress = 100
+                                if (aliyunTokenJson.isNullOrBlank() && url != null && url != "about:blank") {
+                                    view?.postDelayed(
+                                        {
+                                            if (webViewRef == null || webError != null) return@postDelayed
+                                            view.evaluateJavascript(
+                                                """
+                                                (function() {
+                                                    var body = document.body;
+                                                    var textLen = body ? (body.innerText || '').trim().length : 0;
+                                                    var visual = document.querySelector('iframe,canvas,svg,img,embed,object,video');
+                                                    if (textLen < 8 && !visual && window.XmuViewerBridge) {
+                                                        window.XmuViewerBridge.onBlankDetected('页面返回空文档');
+                                                    } else if (window.XmuViewerBridge) {
+                                                        window.XmuViewerBridge.onReady();
+                                                    }
+                                                })();
+                                                """.trimIndent(),
+                                                null,
+                                            )
+                                        },
+                                        2600L,
+                                    )
+                                }
+                            }
+
                             override fun onReceivedError(
                                 view: WebView?,
                                 request: WebResourceRequest?,
                                 error: WebResourceError?,
                             ) {
                                 if (request?.isForMainFrame == true) {
-                                    webError = "在线预览页面加载失败（可能需要校内网络或当前文档暂未开放网页预览）"
+                                    val desc = error?.description?.toString().orEmpty()
+                                    DebugLogStore.log("VIEWER", "mainFrame error=${error?.errorCode} desc=$desc", "ERR")
+                                    webError = "在线预览加载失败（${desc.ifBlank { "网络不可达或需要校内网络" }}）"
                                 }
+                            }
+
+                            override fun onReceivedHttpError(
+                                view: WebView?,
+                                request: WebResourceRequest?,
+                                errorResponse: WebResourceResponse?,
+                            ) {
+                                if (request?.isForMainFrame == true) {
+                                    val code = errorResponse?.statusCode ?: 0
+                                    DebugLogStore.log("VIEWER", "mainFrame HTTP $code", "ERR")
+                                    if (code >= 400) {
+                                        webError = "在线预览服务返回异常状态（HTTP $code），可切回原生阅读或外部打开"
+                                    }
+                                }
+                            }
+
+                            override fun onReceivedSslError(
+                                view: WebView?,
+                                handler: SslErrorHandler?,
+                                error: SslError?,
+                            ) {
+                                handler?.cancel()
+                                DebugLogStore.log("VIEWER", "SSL error primary=${error?.primaryError}", "ERR")
+                                webError = "预览站点证书校验未通过（可能为校内私有域名），建议使用外部浏览器打开或切回原生阅读"
                             }
                         }
 
-                        if (!aliyunTokenJson.isNullOrBlank()) {
-                            val html = buildAliyunOfficeHtml(aliyunTokenJson)
-                            if (html != null) {
-                                loadDataWithBaseURL("https://lnt.xmu.edu.cn/", html, "text/html", "UTF-8", null)
-                            } else if (!previewUrl.isNullOrBlank()) {
-                                loadUrl(previewUrl)
-                            } else {
-                                webError = "未获取到在线预览地址"
-                            }
-                        } else if (!previewUrl.isNullOrBlank()) {
-                            loadUrl(previewUrl)
-                        } else {
-                            webError = "未获取到在线预览地址"
+                        loadIntoWebView(this, useWpsIframeFallback)
+                    }
+                },
+                update = { wv ->
+                    val tagKey = "$previewUrl|$aliyunTokenJson|$useWpsIframeFallback"
+                    if (wv.tag != tagKey && webError == null) {
+                        wv.tag = tagKey
+                        if (useWpsIframeFallback || wv.url == null) {
+                            loadIntoWebView(wv, useWpsIframeFallback)
                         }
                     }
                 },
@@ -814,6 +1018,17 @@ private fun OnlineDocumentWebView(
                             if (canFallbackNative) {
                                 Button(onClick = onFallbackToNative, modifier = Modifier.weight(1f)) {
                                     Text("切回原生阅读")
+                                }
+                            } else if (!previewUrl.isNullOrBlank()) {
+                                Button(
+                                    onClick = {
+                                        runCatching { uriHandler.openUri(previewUrl) }.onFailure {
+                                            Toast.makeText(context, "无法调起系统浏览器", Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                ) {
+                                    Text("浏览器打开")
                                 }
                             }
                             FilledTonalButton(onClick = onOpenExternal, modifier = Modifier.weight(1f)) {
@@ -915,13 +1130,19 @@ private fun UnsupportedFileCard(
 
 private fun buildAliyunOfficeHtml(tokenJson: String): String? {
     val obj = runCatching { JSONObject(tokenJson) }.getOrNull() ?: return null
-    val url = obj.optString("PreviewURL")
+    val rawUrl = obj.optString("PreviewURL")
         .ifBlank { obj.optString("WebofficeURL") }
         .ifBlank { obj.optString("WebofficeUrl") }
         .ifBlank { obj.optString("EditURL") }
     val token = obj.optString("AccessToken")
-    if (url.isBlank() || token.isBlank()) return null
-    val safeUrl = JSONObject.quote(url)
+    if (rawUrl.isBlank() || token.isBlank()) return null
+    val finalUrl = if (rawUrl.contains("lang=", ignoreCase = true)) {
+        rawUrl
+    } else {
+        val sep = if (rawUrl.contains('?')) "&" else "?"
+        "${rawUrl}${sep}lang=zh-CN"
+    }
+    val safeUrl = JSONObject.quote(finalUrl)
     val safeToken = JSONObject.quote(token)
     return """
         <!DOCTYPE html>
@@ -929,28 +1150,114 @@ private fun buildAliyunOfficeHtml(tokenJson: String): String? {
         <head>
             <meta charset="utf-8" />
             <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=3,user-scalable=yes" />
-            <style>html,body,#mount{margin:0;padding:0;width:100vw;height:100vh;overflow:hidden;background:#FAFAFA;}</style>
+            <style>
+                html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+                #mount { position: fixed; inset: 0; width: 100%; height: 100%; }
+                #mount iframe { width: 100% !important; height: 100% !important; border: 0 !important; display: block !important; }
+            </style>
         </head>
         <body>
             <div id="mount"></div>
             <script src="https://g.alicdn.com/IMM/office-js/1.1.15/aliyun-web-office-sdk.min.js"
-                    onload="initOffice()" onerror="fallbackRedirect()"></script>
+                    onload="scheduleInit(0)"
+                    onerror="reportErr('阿里云在线预览脚本加载失败')"></script>
             <script>
-                function initOffice() {
-                    if (window.aliyun && window.aliyun.config) {
-                        var ins = window.aliyun.config({
-                            mount: document.getElementById('mount'),
-                            url: $safeUrl,
-                            mode: 'normal'
-                        });
-                        ins.setToken({ token: $safeToken, timeout: 1980000 });
-                    } else {
-                        fallbackRedirect();
+                var _officeOpened = false;
+                function reportErr(msg) {
+                    if (window.XmuViewerBridge) {
+                        window.XmuViewerBridge.onError(String(msg || '在线预览加载失败'));
                     }
                 }
-                function fallbackRedirect() {
-                    location.replace($safeUrl);
+                function scheduleInit(attempt) {
+                    var mount = document.getElementById('mount');
+                    if (!mount || ((mount.clientWidth === 0 || mount.clientHeight === 0) && attempt < 15)) {
+                        requestAnimationFrame(function() { scheduleInit(attempt + 1); });
+                        return;
+                    }
+                    initOffice(mount);
                 }
+                function initOffice(mount) {
+                    try {
+                        if (!window.aliyun || !window.aliyun.config) {
+                            reportErr('阿里云 WebOffice SDK 未就绪');
+                            return;
+                        }
+                        var ins = window.aliyun.config({
+                            mount: mount,
+                            url: $safeUrl,
+                            mode: 'normal',
+                            commandBars: [{ cmbId: 'WPPMobileTimeStamp', attributed: { visible: false } }],
+                            pptOptions: { isShowComment: false },
+                            refreshToken: function() {
+                                return Promise.resolve({ token: $safeToken, timeout: 1980000 });
+                            }
+                        });
+                        ins.setToken({ token: $safeToken, timeout: 1980000 });
+                        ins.on('fileOpen', function() {
+                            _officeOpened = true;
+                            if (window.XmuViewerBridge) window.XmuViewerBridge.onReady();
+                        });
+                        ins.on('error', function(err) {
+                            reportErr((err && (err.message || err.reason)) || '文档在线打开失败');
+                        });
+                        setTimeout(function() {
+                            if (!_officeOpened && !document.querySelector('#mount iframe')) {
+                                reportErr('阿里云文档渲染超时（未挂载视图）');
+                            }
+                        }, 10000);
+                    } catch (e) {
+                        reportErr(e && e.message ? e.message : '在线预览异常');
+                    }
+                }
+            </script>
+        </body>
+        </html>
+    """.trimIndent()
+}
+
+private fun buildWpsIframeHostHtml(wpsUrl: String): String {
+    val safeUrl = JSONObject.quote(wpsUrl)
+    return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=3,user-scalable=yes" />
+            <style>
+                html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+                #office-iframe { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; display: block; }
+            </style>
+        </head>
+        <body>
+            <iframe id="office-iframe" allowfullscreen="true" allow="clipboard-read; clipboard-write"></iframe>
+            <script>
+                var frame = document.getElementById('office-iframe');
+                var wpsOpened = false;
+                window.addEventListener('message', function(ev) {
+                    try {
+                        var data = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data;
+                        if (!data || !data.eventName) return;
+                        if (data.eventName === 'ready' || data.eventName === 'open.result' || data.eventName === 'api.ready') {
+                            wpsOpened = true;
+                            if (window.XmuViewerBridge) window.XmuViewerBridge.onReady();
+                        } else if (data.eventName === 'error') {
+                            if (window.XmuViewerBridge) {
+                                window.XmuViewerBridge.onError((data.data && data.data.reason) || 'WPS 在线预览返回错误');
+                            }
+                        }
+                    } catch (_) {}
+                });
+                frame.onload = function() {
+                    setTimeout(function() {
+                        if (!wpsOpened && window.XmuViewerBridge) {
+                            window.XmuViewerBridge.onReady();
+                        }
+                    }, 1200);
+                };
+                frame.onerror = function() {
+                    if (window.XmuViewerBridge) window.XmuViewerBridge.onError('WPS 预览框架加载失败');
+                };
+                frame.src = $safeUrl;
             </script>
         </body>
         </html>

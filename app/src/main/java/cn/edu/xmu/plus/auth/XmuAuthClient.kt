@@ -612,18 +612,16 @@ class XmuAuthClient(
         runCatching {
             val cm = CookieManager.getInstance()
             cm.setAcceptCookie(true)
-            val domains = listOf(
+            val origins = listOf(
                 LNT_BASE_URL,
                 "https://c-mobile.xmu.edu.cn",
+                "https://xmu.edu.cn",
             )
-            snapshot.cookies.forEach { cookie ->
-                if (cookie.name.isNotBlank() && cookie.value.isNotBlank()) {
-                    domains.forEach { origin ->
-                        cm.setCookie(origin, "${cookie.name}=${cookie.value}; path=/; Secure")
-                    }
+            val validCookies = snapshot.cookies.filter { it.name.isNotBlank() && it.value.isNotBlank() }
+            origins.forEach { origin ->
+                validCookies.forEach { cookie ->
+                    cm.setCookie(origin, "${cookie.name}=${cookie.value}; path=/; Secure")
                 }
-            }
-            domains.forEach { origin ->
                 cm.setCookie(origin, "session=${snapshot.sessionId}; path=/; Secure")
             }
             cm.flush()

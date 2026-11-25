@@ -2,6 +2,7 @@ package cn.edu.xmu.plus.network
 
 import cn.edu.xmu.plus.auth.SessionExpiredException
 import cn.edu.xmu.plus.auth.XmuAuthClient
+import cn.edu.xmu.plus.debug.DebugLogStore
 import cn.edu.xmu.plus.data.ActiveRollcall
 import cn.edu.xmu.plus.data.AttachmentFile
 import cn.edu.xmu.plus.data.AttachmentPreviewInfo
@@ -561,7 +562,11 @@ class TronClassApi(
                 val docHint = hintExt in setOf("pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "wps", "rtf")
                 val infoDeferred = async { getJson("$baseUrl/api/uploads/$uploadId") }
                 val wpsDeferred = async { getJson("$baseUrl/api/uploads/$uploadId/preview/private-wps") }
-                val aliyunDeferred = async { getJson("$baseUrl/api/aliyun-office/token?upload_id=$uploadId&is_mobile=true") }
+                val aliyunDeferred = async {
+                    // Match TronClass H5 flow: hit /preview/aliyun?preview=true to prepare IMM session before fetching token
+                    getJson("$baseUrl/api/uploads/$uploadId/preview/aliyun?preview=true")
+                    getJson("$baseUrl/api/aliyun-office/token?upload_id=$uploadId&is_mobile=true")
+                }
                 val directDeferred = async { getUploadDownloadUrl(uploadId) }
                 val docDeferred = if (docHint) {
                     async { getJson("$baseUrl/api/uploads/document/$uploadId/url?preview=true") }
@@ -602,6 +607,14 @@ class TronClassApi(
                     ?.optStr("preview_url")
                     ?.takeIf { it.isNotBlank() }
                     ?.let { if (it.startsWith("http")) it else "$baseUrl$it" }
+                    ?.let { raw ->
+                        if (raw.contains("viewMode=", ignoreCase = true)) {
+                            raw
+                        } else {
+                            val sep = if (raw.contains('?')) "&" else "?"
+                            "${raw}${sep}viewMode=preview&lang=zh-CN"
+                        }
+                    }
 
                 val aliyunObj = aliyunDeferred.await().getOrNull()?.optObj()
                 val aliyunPreviewUrl = aliyunObj?.let { obj ->
@@ -622,6 +635,11 @@ class TronClassApi(
                     pdfPreviewUrl != null -> pdfPreviewUrl
                     else -> null
                 }
+
+                DebugLogStore.log(
+                    "VIEWER",
+                    "resolve id=$uploadId ext=$ext wps=${wpsUrl != null} aliyun=${aliyunPreviewUrl != null} pdf=${effectivePdfUrl != null}",
+                )
 
                 val resolvedFileType = rawType.ifBlank {
                     ext.uppercase().ifBlank { "FILE" }

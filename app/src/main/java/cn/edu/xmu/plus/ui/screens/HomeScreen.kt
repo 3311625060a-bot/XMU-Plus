@@ -541,13 +541,13 @@ private fun CheckInActionCardsRow(
                         modifier = Modifier
                             .size(42.dp)
                             .clip(RoundedCornerShape(13.dp))
-                            .background(MaterialTheme.colorScheme.tertiaryContainer),
+                            .background(MaterialTheme.colorScheme.primaryContainer),
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.Dialpad,
                             contentDescription = "密码签到",
-                            tint = MaterialTheme.colorScheme.tertiary,
+                            tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(21.dp),
                         )
                     }
