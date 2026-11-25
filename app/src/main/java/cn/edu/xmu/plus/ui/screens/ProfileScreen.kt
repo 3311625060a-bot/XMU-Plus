@@ -427,7 +427,7 @@ fun ProfileScreen(
                         showAboutDialog = false
                     },
                 ) {
-                    Text("前往 GitHub 求 Star")
+                    Text("前往 GitHub 给个 Star")
                 }
             },
         )

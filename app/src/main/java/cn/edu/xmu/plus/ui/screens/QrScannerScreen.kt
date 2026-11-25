@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.util.Size
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
 import androidx.camera.core.Camera
@@ -49,6 +50,7 @@ import androidx.compose.material.icons.rounded.ContentPaste
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.FlashlightOff
 import androidx.compose.material.icons.rounded.FlashlightOn
+import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -96,7 +98,7 @@ import kotlin.math.roundToInt
 
 private sealed interface QrScanPhase {
     data object Scanning : QrScanPhase
-    data object Submitting : QrScanPhase
+    data class Submitting(val label: String = "正在提交签到至畅课平台…") : QrScanPhase
     data class Success(val message: String) : QrScanPhase
     data class Error(val message: String) : QrScanPhase
 }
@@ -144,12 +146,48 @@ fun QrScannerScreen(
             if (hapticsEnabled) {
                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
             }
-            phase = QrScanPhase.Submitting
+            phase = QrScanPhase.Submitting("正在提交签到至畅课平台…")
             phase = when (val res = onSubmitQrCode(raw)) {
                 is CheckInApiResult.Success -> QrScanPhase.Success(res.message)
                 is CheckInApiResult.Error -> QrScanPhase.Error(res.message)
             }
         }
+    }
+
+    val galleryPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri == null) {
+            scanLock.set(false)
+            return@rememberLauncherForActivityResult
+        }
+        scanLock.set(true)
+        phase = QrScanPhase.Submitting("正在识别相册图片中的二维码…")
+        val inputImage = runCatching { InputImage.fromFilePath(context, uri) }.getOrNull()
+        if (inputImage == null) {
+            phase = QrScanPhase.Error("无法读取所选图片，请重新选择或对准屏幕扫码")
+            return@rememberLauncherForActivityResult
+        }
+        val galleryScanner = BarcodeScanning.getClient(
+            BarcodeScannerOptions.Builder()
+                .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+                .build(),
+        )
+        galleryScanner.process(inputImage)
+            .addOnSuccessListener { barcodes ->
+                val raw = barcodes.firstOrNull { !it.rawValue.isNullOrBlank() }?.rawValue
+                if (raw != null) {
+                    handleQrPayload(raw)
+                } else {
+                    phase = QrScanPhase.Error("未在图片中识别到签到二维码，请换一张清晰截图")
+                }
+            }
+            .addOnFailureListener { err ->
+                phase = QrScanPhase.Error("识别相册二维码失败：${err.message ?: "请重试"}")
+            }
+            .addOnCompleteListener {
+                runCatching { galleryScanner.close() }
+            }
     }
 
     val infiniteTransition = rememberInfiniteTransition(label = "qrScanLine")
@@ -268,7 +306,7 @@ fun QrScannerScreen(
                         )
                         Text("需要相机权限以扫描签到二维码", style = MaterialTheme.typography.titleMedium)
                         Text(
-                            text = "授权相机后即可对准教室大屏二维码秒速签到，也可以点击下方手动粘贴二维码内容。",
+                            text = "授权相机后即可对准教室大屏二维码秒速签到，也可以点击下方从相册扫码或手动粘贴二维码内容。",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -318,45 +356,68 @@ fun QrScannerScreen(
                 when (currentPhase) {
                     QrScanPhase.Scanning -> {
                         Surface(
-                            shape = RoundedCornerShape(26.dp),
+                            shape = RoundedCornerShape(24.dp),
                             color = MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = 0.94f),
                             modifier = Modifier.fillMaxWidth(),
                         ) {
-                            Row(
+                            Column(
                                 modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically,
+                                verticalArrangement = Arrangement.spacedBy(12.dp),
                             ) {
-                                Column(modifier = Modifier.weight(1f)) {
+                                Column {
                                     Text("对准课堂签到二维码", style = MaterialTheme.typography.titleSmall)
                                     Text(
-                                        text = "支持畅课 JSON 与 /j?p= 跳转二维码",
+                                        text = "支持实时扫码、从相册选图识别或手动粘贴链接",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                 }
-                                FilledTonalButton(
-                                    onClick = {
-                                        scanLock.set(true)
-                                        showPasteDialog = true
-                                    },
-                                    shape = RoundedCornerShape(16.dp),
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.ContentPaste,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp),
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("手动粘贴")
+                                    FilledTonalButton(
+                                        onClick = {
+                                            scanLock.set(true)
+                                            galleryPickerLauncher.launch(
+                                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                                            )
+                                        },
+                                        shape = RoundedCornerShape(16.dp),
+                                        modifier = Modifier.weight(1f),
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.PhotoLibrary,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp),
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("相册扫码")
+                                    }
+                                    FilledTonalButton(
+                                        onClick = {
+                                            scanLock.set(true)
+                                            showPasteDialog = true
+                                        },
+                                        shape = RoundedCornerShape(16.dp),
+                                        modifier = Modifier.weight(1f),
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.ContentPaste,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp),
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("手动粘贴")
+                                    }
                                 }
                             }
                         }
                     }
 
-                    QrScanPhase.Submitting -> {
+                    is QrScanPhase.Submitting -> {
                         Surface(
-                            shape = RoundedCornerShape(26.dp),
+                            shape = RoundedCornerShape(24.dp),
                             color = MaterialTheme.colorScheme.surfaceContainerLowest,
                             modifier = Modifier.fillMaxWidth(),
                         ) {
@@ -367,7 +428,7 @@ fun QrScannerScreen(
                             ) {
                                 LoadingIndicator(modifier = Modifier.size(34.dp))
                                 Spacer(modifier = Modifier.width(14.dp))
-                                Text("正在提交签到至畅课平台…", style = MaterialTheme.typography.titleSmall)
+                                Text(currentPhase.label, style = MaterialTheme.typography.titleSmall)
                             }
                         }
                     }
