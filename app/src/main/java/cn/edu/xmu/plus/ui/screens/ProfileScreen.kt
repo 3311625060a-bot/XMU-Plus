@@ -28,7 +28,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Badge
 import androidx.compose.material.icons.rounded.Info
-import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.School
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.VerifiedUser
@@ -301,27 +300,19 @@ fun ProfileScreen(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Column {
-                        val appearanceShape = groupedCardShape(0, 4)
-                        val appearanceSharedModifier = Modifier.optionalSharedBounds(
-                            sharedTransitionScope = sharedTransitionScope,
-                            animatedVisibilityScope = animatedVisibilityScope,
-                            key = "settings_card_appearance",
-                            clipShape = appearanceShape,
-                        )
-
-                        val generalShape = groupedCardShape(1, 4)
+                        val settingsShape = groupedCardShape(0, 3)
                         val generalSharedModifier = Modifier.optionalSharedBounds(
                             sharedTransitionScope = sharedTransitionScope,
                             animatedVisibilityScope = animatedVisibilityScope,
                             key = "settings_card_general",
-                            clipShape = generalShape,
+                            clipShape = settingsShape,
                         )
 
                         ProfileMenuRow(
-                            icon = Icons.Rounded.Palette,
-                            title = "外观与点缀色调",
-                            subtitle = "${themeSettings.accentTone.displayName} · ${themeSettings.darkMode.label} · ${themeSettings.dockStyle.label}",
-                            modifier = appearanceSharedModifier,
+                            icon = Icons.Rounded.Settings,
+                            title = "应用设置",
+                            subtitle = "${themeSettings.accentTone.displayName} · ${themeSettings.darkMode.label} · 提醒与动效",
+                            modifier = generalSharedModifier,
                             trailingContent = {
                                 Box(
                                     modifier = Modifier
@@ -330,16 +321,6 @@ fun ProfileScreen(
                                         .background(MaterialTheme.colorScheme.primary),
                                 )
                             },
-                            onClick = { onOpenSettings("appearance") },
-                        )
-
-                        FrostedHairlineDivider(startIndent = 64.dp)
-
-                        ProfileMenuRow(
-                            icon = Icons.Rounded.Settings,
-                            title = "应用设置",
-                            subtitle = "切页动效、提醒通知与平板适配",
-                            modifier = generalSharedModifier,
                             onClick = { onOpenSettings("general") },
                         )
 
