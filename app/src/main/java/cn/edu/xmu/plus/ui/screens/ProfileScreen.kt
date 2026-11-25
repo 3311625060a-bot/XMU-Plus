@@ -398,9 +398,8 @@ fun ProfileScreen(
                             )
                             Text(
                                 text = repoUrl,
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 10.5.sp,
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontSize = 11.5.sp,
                                 ),
                                 maxLines = 1,
                                 color = MaterialTheme.colorScheme.primary,
