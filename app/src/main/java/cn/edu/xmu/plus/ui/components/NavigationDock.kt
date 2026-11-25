@@ -174,22 +174,21 @@ private fun Modifier.dockActiveLensSurface(
     }
     if (dockStyle == DockStyle.LIQUID_GLASS) {
         scaled
-            .shadow(elevation = if (isInteracting) 8.dp else 3.dp, shape = shape, clip = false)
             .clip(shape)
             .background(
                 if (isDark) {
-                    Color.White.copy(alpha = 0.19f)
+                    Color.White.copy(alpha = if (isInteracting) 0.24f else 0.19f)
                 } else {
-                    Color.White.copy(alpha = 0.84f)
+                    Color.White.copy(alpha = if (isInteracting) 0.92f else 0.84f)
                 },
             )
-            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f))
+            .background(MaterialTheme.colorScheme.primary.copy(alpha = if (isInteracting) 0.14f else 0.12f))
             .border(
                 width = 0.9.dp,
                 brush = Brush.verticalGradient(
                     colors = listOf(
                         Color.White.copy(alpha = if (isDark) 0.48f else 0.98f),
-                        Color.White.copy(alpha = 0.10f),
+                        MaterialTheme.colorScheme.outlineVariant.copy(alpha = if (isDark) 0.30f else 0.35f),
                     ),
                 ),
                 shape = shape,
