@@ -38,11 +38,14 @@ android {
         }
     }
 
+    val enableR8Minify = (findProperty("minifyRelease") as? String)?.toBooleanStrictOrNull() ?: true
+
     buildTypes {
         release {
-            // MIT open-source build: keep obfuscation disabled as requested.
-            isMinifyEnabled = false
-            isShrinkResources = false
+            // Enable R8 shrinking/optimization & resource shrinking by default to reduce APK size;
+            // contributors can override via `-PminifyRelease=false` for unminified release inspection.
+            isMinifyEnabled = enableR8Minify
+            isShrinkResources = enableR8Minify
             signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

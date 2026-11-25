@@ -10,7 +10,7 @@
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.3.21-7F52FF.svg)](#技术栈)
 [![Jetpack Compose](https://img.shields.io/badge/Jetpack%20Compose-Material%203-4285F4.svg)](#技术栈)
 
-[功能特性](#核心功能) • [界面预览](#界面预览) • [项目结构](#项目结构) • [本地构建](#本地构建) • [开源许可](#开源与致谢)
+[功能特性](#核心功能) • [界面预览](#界面预览) • [项目结构](#项目结构) • [本地构建](#本地构建与发布说明) • [开源许可](#开源与致谢)
 
 </div>
 
@@ -125,7 +125,7 @@ app/src/main/java/cn/edu/xmu/plus/
 
 ---
 
-## 本地构建
+## 本地构建与发布说明
 
 1. 克隆本仓库到本地：
    ```bash
@@ -136,12 +136,18 @@ app/src/main/java/cn/edu/xmu/plus/
    # 运行单元测试
    ./gradlew testDebugUnitTest
 
-   # 构建 Debug APK
+   # 构建 Debug APK（无混淆，适合日常二次开发与断点调试）
    ./gradlew assembleDebug
 
-   # 构建 Release APK（未开启混淆，如需自定义签名可在根目录提供 signing.properties）
+   # 构建 Release APK（默认开启 R8 混淆压缩与资源裁剪，体积更小、性能更佳）
    ./gradlew assembleRelease
+
+   # 开发者如需构建未混淆的 Release 包用于对照排查，可附加参数：
+   ./gradlew assembleRelease -PminifyRelease=false
    ```
+3. **对开源社区与用户的友好保障**：
+   - `proguard-rules.pro` 保留了 `SourceFile` 与 `LineNumberTable`，即使开启 R8 混淆，用户反馈的异常堆栈仍可定位文件与行号；每次正式 Release 亦会在 `app/build/outputs/mapping/release/mapping.txt` 产出映射表随版留档。
+   - **安全与隐私承诺**：无任何第三方统计分析或闭源 SDK，账号密码及会话仅通过 **Android Keystore（AES-256-GCM）** 在本地硬件加密存储，网络请求仅直连厦门大学官方域名；如需自定义正式签名可在根目录放置 `signing.properties`（已被 `.gitignore` 忽略，不会随代码提交）。
 
 ---
 

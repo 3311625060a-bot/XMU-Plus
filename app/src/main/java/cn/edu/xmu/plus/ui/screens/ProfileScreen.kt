@@ -55,6 +55,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import cn.edu.xmu.plus.BuildConfig
@@ -119,86 +120,148 @@ fun ProfileScreen(
                 )
             }
 
-            // Hero Identity Card
+            // Hero Identity Card (2-tier Swiss editorial layout)
             item {
                 FrostedGlassCard(
                     shape = RoundedCornerShape(22.dp),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Row(
-                        modifier = Modifier.padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(52.dp)
-                                .clip(RoundedCornerShape(16.dp))
-                                .background(MaterialTheme.colorScheme.primaryContainer),
-                            contentAlignment = Alignment.Center,
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            when (authState) {
-                                AuthState.Checking -> LoadingIndicator(modifier = Modifier.size(24.dp))
-                                is AuthState.LoggedIn -> Icon(
-                                    imageVector = Icons.Rounded.VerifiedUser,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(24.dp),
+                            Box(
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .clip(RoundedCornerShape(13.dp))
+                                    .background(MaterialTheme.colorScheme.primaryContainer),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                when (authState) {
+                                    AuthState.Checking -> LoadingIndicator(modifier = Modifier.size(22.dp))
+                                    is AuthState.LoggedIn -> Icon(
+                                        imageVector = Icons.Rounded.VerifiedUser,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(22.dp),
+                                    )
+                                    AuthState.LoggedOut -> Icon(
+                                        imageVector = Icons.Rounded.School,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(22.dp),
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    Text(
+                                        text = when (authState) {
+                                            is AuthState.LoggedIn -> authState.profile.name
+                                            AuthState.Checking -> "正在恢复会话…"
+                                            AuthState.LoggedOut -> "厦大同学"
+                                        },
+                                        style = MaterialTheme.typography.titleLarge,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    if (authState is AuthState.LoggedIn && authState.isRefreshing) {
+                                        Text(
+                                            text = "· 同步中",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                        )
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = when (authState) {
+                                        is AuthState.LoggedIn -> buildString {
+                                            append(authState.profile.userNo.ifBlank { "已认证" })
+                                            append(" · ")
+                                            append(authState.profile.role)
+                                        }
+                                        AuthState.Checking -> "正在验证 Keystore 加密会话"
+                                        AuthState.LoggedOut -> "统一身份认证 · 未登录"
+                                    },
+                                    style = MaterialTheme.typography.labelMedium.copy(
+                                        fontFamily = if (authState is AuthState.LoggedIn) {
+                                            FontFamily.Monospace
+                                        } else {
+                                            FontFamily.Default
+                                        },
+                                        fontFeatureSettings = "tnum",
+                                    ),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
-                                AuthState.LoggedOut -> Icon(
+                            }
+                            when (authState) {
+                                is AuthState.LoggedIn -> Surface(
+                                    shape = RoundedCornerShape(11.dp),
+                                    color = MaterialTheme.colorScheme.surfaceContainer,
+                                    modifier = Modifier
+                                        .border(
+                                            width = 0.6.dp,
+                                            color = MaterialTheme.colorScheme.outlineVariant,
+                                            shape = RoundedCornerShape(11.dp),
+                                        )
+                                        .bounceClickable { showLogoutDialog = true },
+                                ) {
+                                    Text(
+                                        text = "退出登录",
+                                        style = MaterialTheme.typography.labelMedium.copy(
+                                            fontWeight = FontWeight.Medium,
+                                        ),
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                                    )
+                                }
+                                AuthState.LoggedOut -> FilledTonalButton(
+                                    onClick = onOpenLogin,
+                                    shape = RoundedCornerShape(11.dp),
+                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                                ) {
+                                    Text("去登录", style = MaterialTheme.typography.labelMedium)
+                                }
+                                AuthState.Checking -> Unit
+                            }
+                        }
+
+                        if (authState is AuthState.LoggedIn && authState.profile.department.isNotBlank()) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            FrostedHairlineDivider()
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Icon(
                                     imageVector = Icons.Rounded.School,
                                     contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(24.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f),
+                                    modifier = Modifier.size(15.dp),
+                                )
+                                Text(
+                                    text = authState.profile.department,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                             }
-                        }
-                        Spacer(modifier = Modifier.width(14.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = when (authState) {
-                                    is AuthState.LoggedIn -> authState.profile.name
-                                    AuthState.Checking -> "正在恢复会话…"
-                                    AuthState.LoggedOut -> "厦大同学"
-                                },
-                                style = MaterialTheme.typography.titleLarge,
-                                color = MaterialTheme.colorScheme.onSurface,
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = when (authState) {
-                                    is AuthState.LoggedIn -> buildString {
-                                        append(authState.profile.userNo.ifBlank { "已认证" })
-                                        append(" · ")
-                                        append(authState.profile.role)
-                                        if (authState.profile.department.isNotBlank()) {
-                                            append(" · ")
-                                            append(authState.profile.department)
-                                        }
-                                        if (authState.isRefreshing) {
-                                            append("（同步中）")
-                                        }
-                                    }
-                                    AuthState.Checking -> "正在验证 Keystore 加密会话"
-                                    AuthState.LoggedOut -> "统一身份认证 · 未登录"
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        when (authState) {
-                            is AuthState.LoggedIn -> FilledTonalButton(
-                                onClick = { showLogoutDialog = true },
-                                shape = RoundedCornerShape(14.dp),
-                            ) {
-                                Text("退出登录")
-                            }
-                            AuthState.LoggedOut -> FilledTonalButton(
-                                onClick = onOpenLogin,
-                                shape = RoundedCornerShape(14.dp),
-                            ) {
-                                Text("去登录")
-                            }
-                            AuthState.Checking -> Unit
                         }
                     }
                 }
@@ -397,11 +460,13 @@ fun ProfileScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             Text(
-                                text = repoUrl,
+                                text = repoUrl.removePrefix("https://"),
                                 style = MaterialTheme.typography.bodySmall.copy(
-                                    fontSize = 11.5.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp,
                                 ),
                                 maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                                 color = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.clickable(onClick = openRepo),
                             )
