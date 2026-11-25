@@ -68,6 +68,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.ImeAction
@@ -427,6 +429,15 @@ private fun SsoWebViewOverlay(
         }
     }
 
+    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val primaryHex = String.format("#%06X", 0xFFFFFF and MaterialTheme.colorScheme.primary.toArgb())
+    val bgHex = if (isDark) "#0C0D10" else "#FAFAFA"
+    val cardHex = if (isDark) "#16181D" else "#FFFFFF"
+    val inputBgHex = if (isDark) "#1F2229" else "#F4F5F7"
+    val borderHex = if (isDark) "#2B2F3A" else "#E2E4E9"
+    val textHex = if (isDark) "#F4F4F5" else "#18181B"
+    val mutedHex = if (isDark) "#A1A1AA" else "#71717A"
+
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background,
@@ -484,10 +495,28 @@ private fun SsoWebViewOverlay(
 
                     WebView(context).apply {
                         webViewRef = this
+                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
                         cookieManager.setAcceptThirdPartyCookies(this, true)
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
+                        settings.useWideViewPort = true
+                        settings.loadWithOverviewMode = true
                         settings.userAgentString = XmuAuthClient.MOBILE_UA
+
+                        fun injectCompactStyle(view: WebView?, targetUrl: String?) {
+                            if (targetUrl.orEmpty().contains("ids.xmu.edu.cn/authserver/login")) {
+                                applyCasCompactStyle(
+                                    view = view,
+                                    primaryHex = primaryHex,
+                                    bgHex = bgHex,
+                                    cardHex = cardHex,
+                                    inputBgHex = inputBgHex,
+                                    borderHex = borderHex,
+                                    textHex = textHex,
+                                    mutedHex = mutedHex,
+                                )
+                            }
+                        }
 
                         webChromeClient = object : WebChromeClient() {
                             override fun onProgressChanged(view: WebView?, newProgress: Int) {
@@ -500,6 +529,10 @@ private fun SsoWebViewOverlay(
                                 val parsed = runCatching { android.net.Uri.parse(url.orEmpty()) }.getOrNull()
                                 parsed?.host?.takeIf { it.isNotBlank() }?.let { currentHost = it }
                                 checkAndFinishIfAuthenticated(url, cookieManager, completed, onCookiesCaptured)
+                            }
+
+                            override fun onPageCommitVisible(view: WebView?, url: String?) {
+                                injectCompactStyle(view, url)
                             }
 
                             override fun shouldOverrideUrlLoading(
@@ -522,7 +555,9 @@ private fun SsoWebViewOverlay(
                                     return
                                 }
 
-                                // Pre-fill username & password in #pwdFromId once so user only slides captcha
+                                injectCompactStyle(view, u)
+
+                                // Pre-fill username & password in #pwdLoginDiv / #pwdFromId once
                                 if (u.contains("ids.xmu.edu.cn/authserver/login") &&
                                     request.username.isNotBlank() &&
                                     request.password.isNotBlank() &&
@@ -532,14 +567,14 @@ private fun SsoWebViewOverlay(
                                     val safePass = JSONObject.quote(request.password)
                                     val js = """
                                         (function() {
-                                            var form = document.getElementById('pwdFromId');
-                                            if (!form) {
+                                            var container = document.getElementById('pwdLoginDiv') || document.getElementById('pwdFromId');
+                                            if (!container) {
                                                 var clltInput = document.querySelector('form input[value="userNameLogin"]');
-                                                form = clltInput ? clltInput.closest('form') : null;
+                                                container = clltInput ? clltInput.closest('form') : null;
                                             }
-                                            if (!form) return;
-                                            var u = form.querySelector('#username, input[name="username"]');
-                                            var p = form.querySelector('#password, input[type="password"]');
+                                            if (!container) return;
+                                            var u = container.querySelector('#username, input[name="username"]');
+                                            var p = container.querySelector('#password, input[name="userPassword"], input[type="password"]');
                                             if (u && !u.value) {
                                                 u.value = $safeUser;
                                                 u.dispatchEvent(new Event('input', { bubbles: true }));
@@ -589,4 +624,126 @@ private fun checkAndFinishIfAuthenticated(
         return true
     }
     return false
+}
+
+private fun applyCasCompactStyle(
+    view: WebView?,
+    primaryHex: String,
+    bgHex: String,
+    cardHex: String,
+    inputBgHex: String,
+    borderHex: String,
+    textHex: String,
+    mutedHex: String,
+) {
+    val compactCss = """
+        html, body {
+            position: static !important;
+            height: auto !important;
+            min-height: 100% !important;
+            overflow-y: auto !important;
+            background: $bgHex !important;
+            background-image: none !important;
+            color: $textHex !important;
+        }
+        body > .swiper-container,
+        .language-box,
+        .header.school-logo,
+        .footer.combine_options_footer,
+        #formMessageTip,
+        #formMessageTip + div {
+            display: none !important;
+        }
+        .index_login2 {
+            position: static !important;
+            top: auto !important;
+            max-height: none !important;
+            height: auto !important;
+            width: calc(100% - 32px) !important;
+            margin: 10px 16px 20px 16px !important;
+            padding: 16px 16px 14px 16px !important;
+            background: $cardHex !important;
+            border: 1px solid $borderHex !important;
+            border-radius: 18px !important;
+            box-shadow: none !important;
+            backdrop-filter: none !important;
+            box-sizing: border-box !important;
+        }
+        .tabs-head {
+            display: flex !important;
+            gap: 10px !important;
+            margin: 0 0 12px 0 !important;
+            padding-bottom: 10px !important;
+            border-bottom: 1px solid $borderHex !important;
+        }
+        .tabs-head a {
+            flex: 1 !important;
+            text-align: center !important;
+            font-size: 13px !important;
+            padding: 7px 6px !important;
+            border-radius: 10px !important;
+            color: $mutedHex !important;
+            text-decoration: none !important;
+        }
+        .tabs-head a.selected {
+            color: $primaryHex !important;
+            background: $inputBgHex !important;
+            font-weight: 600 !important;
+        }
+        .form .input_box, .form .input_add {
+            margin: 0 0 10px 0 !important;
+            border-bottom: none !important;
+        }
+        .form input {
+            margin-top: 0 !important;
+            height: 44px !important;
+            padding: 0 38px 0 12px !important;
+            border-radius: 12px !important;
+            background-color: $inputBgHex !important;
+            border: 1px solid $borderHex !important;
+            color: $textHex !important;
+            font-size: 15px !important;
+            box-sizing: border-box !important;
+        }
+        .form input:focus {
+            border-color: $primaryHex !important;
+        }
+        .form .input_del, .form .input_eye {
+            bottom: 10px !important;
+        }
+        .main .btns {
+            margin: 12px 0 8px 0 !important;
+        }
+        .main .btn_login {
+            height: 46px !important;
+            line-height: 46px !important;
+            border-radius: 14px !important;
+            background: $primaryHex !important;
+            color: #FFFFFF !important;
+            font-size: 15px !important;
+            font-weight: 600 !important;
+        }
+        .btns_d {
+            margin-top: 8px !important;
+            overflow: hidden !important;
+        }
+        .btns_d .forget_pwd a {
+            color: $mutedHex !important;
+            font-size: 12px !important;
+        }
+    """.trimIndent()
+    val safeCss = JSONObject.quote(compactCss)
+    val styleJs = """
+        (function() {
+            var id = 'xmu-plus-compact-cas';
+            var st = document.getElementById(id);
+            if (!st) {
+                st = document.createElement('style');
+                st.id = id;
+                (document.head || document.documentElement).appendChild(st);
+            }
+            st.textContent = $safeCss;
+        })();
+    """.trimIndent()
+    view?.evaluateJavascript(styleJs, null)
 }
