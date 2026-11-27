@@ -29,6 +29,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -266,13 +267,38 @@ class XmuMainViewModel(application: Application) : AndroidViewModel(application)
                     val todos = todosDeferred.await().getOrElse { emptyList() }
                     val rollcalls = rollcallsDeferred.await().getOrElse { emptyList() }
 
-                    // Fan out homework-activities across courses (matched to OkHttp maxRequestsPerHost=12)
-                    val sem = Semaphore(10)
+                    // Phase 1 progressive first paint: surface courses, pending todos & rollcalls immediately
+                    val sortedTodos = todos.sortedBy {
+                        TimeFormatUtils.parseIsoInstant(it.endTimeIso)?.toEpochMilli() ?: Long.MAX_VALUE
+                    }
+                    val todoPendingByCourse = sortedTodos.groupingBy { it.courseId }.eachCount()
+                    val quickCourses = courses.map { c ->
+                        val p = todoPendingByCourse[c.id] ?: c.pendingHomeworkCount
+                        c.copy(pendingHomeworkCount = p)
+                    }
+                    _uiState.update { state ->
+                        state.copy(
+                            isDemoMode = false,
+                            isRefreshing = true,
+                            activeRollcalls = rollcalls,
+                            semesters = semesters,
+                            selectedSemesterId = targetSemesterId,
+                            courses = quickCourses,
+                            homeworks = if (state.homeworks.isEmpty()) sortedTodos else state.homeworks,
+                            lastSyncText = "正在同步各科作业…",
+                            errorMessage = null,
+                        )
+                    }
+
+                    // Phase 2 bounded fan-out across courses with per-course timeout guard
+                    val sem = Semaphore(6)
                     val courseHomeworks = courses.take(15).map { course ->
                         async {
                             sem.withPermit {
-                                currentApi.getCourseHomeworks(course.id, course.name)
-                                    .getOrElse { emptyList() }
+                                withTimeoutOrNull(8_000L) {
+                                    currentApi.getCourseHomeworks(course.id, course.name)
+                                        .getOrElse { emptyList() }
+                                } ?: emptyList()
                             }
                         }
                     }.awaitAll().flatten()
@@ -303,17 +329,6 @@ class XmuMainViewModel(application: Application) : AndroidViewModel(application)
                         c.copy(pendingHomeworkCount = pendingByCourse[c.id] ?: 0)
                     }
 
-                    cacheStore.putJson(
-                        key = dashboardCacheKey(userId),
-                        value = DashboardCacheSnapshot(
-                            semesters = semesters,
-                            selectedSemesterId = targetSemesterId,
-                            courses = enrichedCourses,
-                            homeworks = sortedHomeworks,
-                        ),
-                        serializer = DashboardCacheSnapshot.serializer(),
-                    )
-
                     val syncLabel = "刚刚同步 · ${formatClock(System.currentTimeMillis())}"
                     _uiState.update {
                         it.copy(
@@ -328,11 +343,28 @@ class XmuMainViewModel(application: Application) : AndroidViewModel(application)
                             errorMessage = null,
                         )
                     }
-                    publishWidgetSnapshot(
-                        isLoggedIn = true,
-                        homeworks = sortedHomeworks,
-                        updatedAtText = syncLabel,
-                    )
+
+                    // Persist offline SQLite cache & update widget off the UI completion critical path
+                    launch(Dispatchers.IO) {
+                        runCatching {
+                            cacheStore.putJson(
+                                key = dashboardCacheKey(userId),
+                                value = DashboardCacheSnapshot(
+                                    semesters = semesters,
+                                    selectedSemesterId = targetSemesterId,
+                                    courses = enrichedCourses,
+                                    homeworks = sortedHomeworks,
+                                ),
+                                serializer = DashboardCacheSnapshot.serializer(),
+                            )
+                            publishWidgetSnapshot(
+                                isLoggedIn = true,
+                                homeworks = sortedHomeworks,
+                                updatedAtText = syncLabel,
+                            )
+                        }
+                    }
+
                     val elapsedMs = System.currentTimeMillis() - syncStartMs
                     DebugLogStore.log(
                         "SYNC",

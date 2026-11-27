@@ -17,11 +17,13 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -31,6 +33,7 @@ import androidx.compose.material.icons.automirrored.rounded.FactCheck
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Badge
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.NewReleases
 import androidx.compose.material.icons.rounded.School
@@ -68,6 +71,7 @@ import cn.edu.xmu.plus.BuildConfig
 import cn.edu.xmu.plus.auth.AuthState
 import cn.edu.xmu.plus.data.AppUpdateChecker
 import cn.edu.xmu.plus.data.HomeworkStatus
+import cn.edu.xmu.plus.data.OpenSourceLicenses
 import cn.edu.xmu.plus.data.ThemeSettings
 import cn.edu.xmu.plus.data.UpdateCheckResult
 import cn.edu.xmu.plus.data.XmuDashboardState
@@ -425,6 +429,7 @@ private fun AboutXmuPlusDialog(
     val scope = rememberCoroutineScope()
     val repoUrl = AppUpdateChecker.REPO_URL
     var updateState by remember { mutableStateOf<AboutUpdateUiState>(AboutUpdateUiState.Idle) }
+    var showLicensesDialog by remember { mutableStateOf(false) }
 
     val openUriSafe: (String, String) -> Unit = { url, errMsg ->
         runCatching { uriHandler.openUri(url) }.onFailure {
@@ -664,6 +669,52 @@ private fun AboutXmuPlusDialog(
                     }
                 }
 
+                // Open-Source Software Licenses Card
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainer,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(
+                            width = 0.6.dp,
+                            color = MaterialTheme.colorScheme.outlineVariant,
+                            shape = RoundedCornerShape(14.dp),
+                        )
+                        .clip(RoundedCornerShape(14.dp))
+                        .clickable { showLicensesDialog = true },
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Description,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "开源软件许可",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Text(
+                                text = "包含 ${OpenSourceLicenses.items.size} 项第三方开源库与 SDK 声明",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                }
+
                 Text(
                     text = "如果这个小助手帮到了你，欢迎去 GitHub 点个 Star 支持一下 ⭐",
                     style = MaterialTheme.typography.bodySmall,
@@ -684,6 +735,108 @@ private fun AboutXmuPlusDialog(
                 },
             ) {
                 Text("前往 GitHub 给个 Star")
+            }
+        },
+    )
+
+    if (showLicensesDialog) {
+        OpenSourceLicensesDialog(
+            onOpenUrl = { url -> openUriSafe(url, "无法打开链接") },
+            onDismiss = { showLicensesDialog = false },
+        )
+    }
+}
+
+@Composable
+private fun OpenSourceLicensesDialog(
+    onOpenUrl: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("开源软件许可")
+                Text(
+                    text = "感谢以下开源项目为 XMU Plus 提供基础能力",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        text = {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 400.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(OpenSourceLicenses.items, key = { it.name }) { item ->
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainer,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(
+                                width = 0.6.dp,
+                                color = MaterialTheme.colorScheme.outlineVariant,
+                                shape = RoundedCornerShape(12.dp),
+                            )
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { onOpenUrl(item.url) },
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(11.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = item.name,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = MaterialTheme.colorScheme.primaryContainer,
+                                ) {
+                                    Text(
+                                        text = item.license,
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontFamily = FontFamily.Monospace,
+                                            fontSize = 10.sp,
+                                        ),
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    )
+                                }
+                            }
+                            Text(
+                                text = "${item.version} · ${item.author}",
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp,
+                                ),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                text = item.description,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("关闭")
             }
         },
     )

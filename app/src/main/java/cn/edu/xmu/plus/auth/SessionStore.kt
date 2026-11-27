@@ -58,6 +58,28 @@ class SessionStore(private val context: Context) {
         }
     }
 
+    suspend fun saveSessionAndCredentials(
+        session: PersistedSession,
+        username: String?,
+        password: String?,
+    ) {
+        inMemorySession.set(session)
+        val encodedSession = json.encodeToString(session)
+        val encryptedSession = KeystoreCrypto.encrypt(encodedSession)
+        val encryptedCreds = if (!username.isNullOrBlank() && !password.isNullOrEmpty()) {
+            val encodedCreds = json.encodeToString(SavedCredentials(username = username, password = password))
+            KeystoreCrypto.encrypt(encodedCreds)
+        } else {
+            null
+        }
+        context.authDataStore.edit { prefs ->
+            prefs[Keys.ENCRYPTED_SESSION] = encryptedSession
+            if (encryptedCreds != null) {
+                prefs[Keys.ENCRYPTED_CREDENTIALS] = encryptedCreds
+            }
+        }
+    }
+
     suspend fun updateSessionId(newSessionId: String) {
         if (newSessionId.isBlank()) return
         val existing = loadSession() ?: return

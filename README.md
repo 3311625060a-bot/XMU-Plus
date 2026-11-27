@@ -33,7 +33,7 @@
   - 支持厦门大学 CAS 原生 AES 加密直连登录，使用 **Android Keystore AES-256-GCM** 硬件加密本地保存账号凭证与会话。
   - 遇到风控滑块或短信验证时自动切出内置安全 WebView 完成验证并同步会话。
 - **双入口快捷课堂签到与考勤查询**
-  - **扫码签到**：集成 CameraX + ML Kit Barcode Scanning 实时识别课堂二维码（兼容畅课 JSON 与 `/j?p=` 跳转链接），支持手电筒、相册扫码与手动粘贴。
+  - **扫码签到**：集成 CameraX + ML Kit Barcode Scanning 实时识别课堂二维码（兼容畅课 JSON 与 `/j?p=` 跳转链接），支持双指捏合缩放、快捷倍率切换、点击对焦、手电筒、相册扫码与手动粘贴。
   - **密码签到**：4 位数字口令专属大键盘，支持错误震动与反馈提示；首页实时捕获正在进行的课堂点名。
   - **签到记录查询**：聚合各门课程的历史点名记录，统计出勤率与已签到 / 迟到请假 / 缺勤次数，支持按状态与课程筛选。
 - **全流程作业中心与内置文档/图片浏览器**
@@ -158,5 +158,18 @@ app/src/main/java/cn/edu/xmu/plus/
 - **作者**：金将军的迈巴赫保养员
 - **GitHub 仓库**：[https://github.com/3311625060a-bot/XMU-Plus](https://github.com/3311625060a-bot/XMU-Plus)
 - **开源协议**：本项目基于 [MIT License](LICENSE) 开源，欢迎提 Issue、PR 与 **Star** 支持！
+
+### 第三方开源软件许可（Open-Source Licenses）
+
+本项目使用并感谢以下优秀的开源软件与 SDK：
+
+| 项目名称 | 版本 | 维护方 / 作者 | 开源协议 | 用途说明 |
+| :--- | :--- | :--- | :--- | :--- |
+| [Kotlin & kotlinx.serialization](https://github.com/JetBrains/kotlin) | `2.3.21 / 1.8.1` | JetBrains s.r.o. | `Apache-2.0` | 编程语言与 JSON 序列化框架 |
+| [AndroidX & Jetpack Compose](https://developer.android.com/jetpack) | `BOM 2026.05.01 / Material 3 1.5.0-alpha16` | The Android Open Source Project | `Apache-2.0` | Compose UI、Navigation、DataStore、Glance 微件、WorkManager 与 CameraX |
+| [OkHttp](https://square.github.io/okhttp/) | `4.12.0` | Square, Inc. | `Apache-2.0` | HTTP/HTTPS 网络客户端与连接池 |
+| [Haze](https://github.com/chrisbanes/haze) | `1.6.10` | Chris Banes | `Apache-2.0` | Compose 实时背景高斯模糊（液态玻璃底栏效果） |
+| [ML Kit Barcode Scanning](https://developers.google.com/ml-kit/vision/barcode-scanning) | `17.3.0` | Google LLC | `Google APIs ToS` | 本地离线课堂签到二维码识别引擎 |
+| [JUnit 4](https://junit.org/junit4/) | `4.13.2` | JUnit Team | `EPL-1.0` | 本地单元测试框架（仅用于测试） |
 
 > 免责声明：本项目为个人开源学习与校园效率辅助工具，非厦门大学官方应用。请勿用于任何违规用途，使用过程中产生的账号及数据交互均在用户本地设备与学校官方服务器之间直接完成。

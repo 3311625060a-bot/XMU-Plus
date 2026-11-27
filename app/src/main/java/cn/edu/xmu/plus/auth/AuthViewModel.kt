@@ -3,6 +3,7 @@ package cn.edu.xmu.plus.auth
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -59,7 +60,13 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                 _authState.value = AuthState.LoggedIn(profile = cachedProfile, isRefreshing = true)
             }
 
-            _authState.value = authClient.verifyStoredSession()
+            val verified = authClient.verifyStoredSession()
+            _authState.value = verified
+            if (verified == AuthState.LoggedOut) {
+                launch(Dispatchers.IO) {
+                    runCatching { authClient.prewarmSso() }
+                }
+            }
         }
     }
 
@@ -107,7 +114,6 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
             }
             when (val result = authClient.loginNative(user, pass)) {
                 is LoginResult.Success -> {
-                    persistCredentialsIfEnabled(user, pass)
                     _authState.value = AuthState.LoggedIn(profile = result.profile, isRefreshing = false)
                     _loginUiState.update {
                         it.copy(
@@ -116,6 +122,9 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                             errorMessage = null,
                             webViewRequest = null,
                         )
+                    }
+                    launch(Dispatchers.IO) {
+                        persistCredentialsIfEnabled(user, pass)
                     }
                 }
 
@@ -179,7 +188,6 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
             }
             when (val result = authClient.completeWebViewLogin(rawCookieHeader)) {
                 is LoginResult.Success -> {
-                    persistCredentialsIfEnabled(currentState.username.trim(), currentState.password)
                     _authState.value = AuthState.LoggedIn(profile = result.profile, isRefreshing = false)
                     _loginUiState.update {
                         it.copy(
@@ -187,6 +195,9 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                             statusMessage = null,
                             errorMessage = null,
                         )
+                    }
+                    launch(Dispatchers.IO) {
+                        persistCredentialsIfEnabled(currentState.username.trim(), currentState.password)
                     }
                 }
 
@@ -210,7 +221,13 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
         if (current !is AuthState.LoggedIn) return
         viewModelScope.launch {
             _authState.value = current.copy(isRefreshing = true)
-            _authState.value = authClient.verifyStoredSession()
+            val verified = authClient.verifyStoredSession()
+            _authState.value = verified
+            if (verified == AuthState.LoggedOut) {
+                launch(Dispatchers.IO) {
+                    runCatching { authClient.prewarmSso() }
+                }
+            }
         }
     }
 

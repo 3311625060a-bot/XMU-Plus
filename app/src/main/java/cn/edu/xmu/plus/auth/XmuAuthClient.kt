@@ -24,12 +24,15 @@ import okhttp3.ConnectionPool
 import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.Dispatcher
+import okhttp3.Dns
 import okhttp3.FormBody
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
+import java.net.Inet4Address
+import java.net.InetAddress
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -65,6 +68,27 @@ class XmuAuthClient(
         maxRequests = 64
         maxRequestsPerHost = 12
     }
+    private val preferIpv4Dns = object : Dns {
+        override fun lookup(hostname: String): List<InetAddress> {
+            val all = Dns.SYSTEM.lookup(hostname)
+            if (all.size <= 1) return all
+            val v4 = all.filterIsInstance<Inet4Address>()
+            if (v4.isEmpty() || v4.size == all.size) return all
+            val other = all.filterNot { it is Inet4Address }
+            return v4 + other
+        }
+    }
+    private val captchaCheckClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectionPool(sharedConnectionPool)
+            .dispatcher(sharedDispatcher)
+            .dns(preferIpv4Dns)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(5, TimeUnit.SECONDS)
+            .build()
+    }
     private val prewarmMutex = Mutex()
     private val prewarmedCas = AtomicReference<PrewarmedCasSession?>(null)
     @Volatile
@@ -73,10 +97,11 @@ class XmuAuthClient(
     val apiClient: OkHttpClient = OkHttpClient.Builder()
         .connectionPool(sharedConnectionPool)
         .dispatcher(sharedDispatcher)
+        .dns(preferIpv4Dns)
         .followRedirects(false)
         .followSslRedirects(false)
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
         .writeTimeout(20, TimeUnit.SECONDS)
         .addInterceptor { chain ->
             val original = chain.request()
@@ -139,11 +164,12 @@ class XmuAuthClient(
         return OkHttpClient.Builder()
             .connectionPool(sharedConnectionPool)
             .dispatcher(sharedDispatcher)
+            .dns(preferIpv4Dns)
             .cookieJar(cookieJar)
             .followRedirects(followRedirects)
             .followSslRedirects(followRedirects)
-            .connectTimeout(12, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
+            .connectTimeout(8, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
             .build()
     }
 
@@ -158,7 +184,12 @@ class XmuAuthClient(
             val fresh = CompletableDeferred<PrewarmedCasSession?>()
             inFlightPrewarm = fresh
             scope.launch {
-                val res = runCatching { fetchCasSessionPage() }.getOrNull()
+                val res = coroutineScope {
+                    val keystoreJob = launch { KeystoreCrypto.warmup() }
+                    val casRes = runCatching { fetchCasSessionPage() }.getOrNull()
+                    keystoreJob.join()
+                    casRes
+                }
                 if (res != null) {
                     prewarmedCas.set(res)
                 }
@@ -202,8 +233,7 @@ class XmuAuthClient(
         if (!referer.isNullOrBlank()) {
             reqBuilder.header("Referer", referer)
         }
-        val client = buildSsoHttpClient(cookieJar = InMemoryCookieJar(), followRedirects = true)
-        return client.newCall(reqBuilder.get().build()).execute().use { resp ->
+        return captchaCheckClient.newCall(reqBuilder.get().build()).execute().use { resp ->
             val raw = resp.body?.string().orEmpty()
             runCatching {
                 json.parseToJsonElement(raw).jsonObject["isNeed"]?.jsonPrimitive?.booleanOrNull ?: false
@@ -329,7 +359,11 @@ class XmuAuthClient(
             val profileResult = fetchProfile()
             return@withContext profileResult.fold(
                 onSuccess = { profile ->
-                    sessionStore.saveSession(pendingSession.copy(profile = profile))
+                    val finalSession = pendingSession.copy(profile = profile)
+                    sessionStore.setMemorySession(finalSession)
+                    scope.launch(Dispatchers.IO) {
+                        runCatching { sessionStore.saveSession(finalSession) }
+                    }
                     if (DebugLogStore.isEnabled()) {
                         val totalMs = System.currentTimeMillis() - loginStartMs
                         DebugLogStore.log("AUTH", "loginNative success in ${totalMs}ms (prewarmed=$usedPrewarm)")
@@ -482,7 +516,11 @@ class XmuAuthClient(
 
         return@withContext fetchProfile().fold(
             onSuccess = { profile ->
-                sessionStore.saveSession(session.copy(profile = profile))
+                val finalSession = session.copy(profile = profile)
+                sessionStore.setMemorySession(finalSession)
+                scope.launch(Dispatchers.IO) {
+                    runCatching { sessionStore.saveSession(finalSession) }
+                }
                 LoginResult.Success(profile)
             },
             onFailure = {

@@ -2,6 +2,7 @@ package cn.edu.xmu.plus.ui.screens
 
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
+import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -490,11 +491,13 @@ private fun SsoWebViewOverlay(
                 factory = { context ->
                     val cookieManager = CookieManager.getInstance()
                     cookieManager.setAcceptCookie(true)
-                    cookieManager.removeAllCookies(null)
-                    cookieManager.flush()
 
                     WebView(context).apply {
                         webViewRef = this
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                        )
                         setBackgroundColor(android.graphics.Color.TRANSPARENT)
                         cookieManager.setAcceptThirdPartyCookies(this, true)
                         settings.javaScriptEnabled = true
@@ -528,7 +531,7 @@ private fun SsoWebViewOverlay(
                             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                                 val parsed = runCatching { android.net.Uri.parse(url.orEmpty()) }.getOrNull()
                                 parsed?.host?.takeIf { it.isNotBlank() }?.let { currentHost = it }
-                                checkAndFinishIfAuthenticated(url, cookieManager, completed, onCookiesCaptured)
+                                checkAndFinishIfAuthenticated(view, url, cookieManager, completed, onCookiesCaptured)
                             }
 
                             override fun onPageCommitVisible(view: WebView?, url: String?) {
@@ -540,7 +543,7 @@ private fun SsoWebViewOverlay(
                                 requestNav: WebResourceRequest?,
                             ): Boolean {
                                 val targetUrl = requestNav?.url?.toString()
-                                if (checkAndFinishIfAuthenticated(targetUrl, cookieManager, completed, onCookiesCaptured)) {
+                                if (checkAndFinishIfAuthenticated(view, targetUrl, cookieManager, completed, onCookiesCaptured)) {
                                     return true
                                 }
                                 return false
@@ -551,7 +554,7 @@ private fun SsoWebViewOverlay(
                                 val parsed = runCatching { android.net.Uri.parse(u) }.getOrNull()
                                 parsed?.host?.takeIf { it.isNotBlank() }?.let { currentHost = it }
 
-                                if (checkAndFinishIfAuthenticated(u, cookieManager, completed, onCookiesCaptured)) {
+                                if (checkAndFinishIfAuthenticated(view, u, cookieManager, completed, onCookiesCaptured)) {
                                     return
                                 }
 
@@ -590,7 +593,10 @@ private fun SsoWebViewOverlay(
                             }
                         }
 
-                        loadUrl(request.ssoUrl)
+                        // Clear stale WebView cookies asynchronously so UI thread never blocks on flush()
+                        cookieManager.removeAllCookies {
+                            post { loadUrl(request.ssoUrl) }
+                        }
                     }
                 },
             )
@@ -599,6 +605,7 @@ private fun SsoWebViewOverlay(
 }
 
 private fun checkAndFinishIfAuthenticated(
+    view: WebView?,
     url: String?,
     cookieManager: CookieManager,
     completed: AtomicBoolean,
@@ -615,10 +622,10 @@ private fun checkAndFinishIfAuthenticated(
 
     if (!landedOnTronClass) return false
 
-    cookieManager.flush()
     val rawCookie = cookieManager.getCookie(XmuAuthClient.LNT_BASE_URL).orEmpty()
     if (rawCookie.contains("session=")) {
         if (completed.compareAndSet(false, true)) {
+            view?.stopLoading()
             onCookiesCaptured(rawCookie)
         }
         return true

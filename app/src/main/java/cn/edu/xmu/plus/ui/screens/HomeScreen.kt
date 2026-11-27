@@ -407,7 +407,7 @@ private fun HomeEditorialHeader(
             Text(
                 text = when (authState) {
                     is AuthState.LoggedIn -> "你好，${authState.profile.name}"
-                    else -> "XMU Plus"
+                    else -> "你好，厦大人"
                 },
                 style = MaterialTheme.typography.headlineMedium,
                 color = MaterialTheme.colorScheme.onBackground,

@@ -23,11 +23,22 @@ object KeystoreCrypto {
     private const val GCM_TAG_BITS = 128
     private const val PREFIX_V1 = "v1:"
 
+    @Volatile
+    private var cachedKey: SecretKey? = null
+
+    fun warmup() {
+        runCatching { getOrCreateKey() }
+    }
+
     @Synchronized
     private fun getOrCreateKey(): SecretKey {
+        cachedKey?.let { return it }
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
         val existing = keyStore.getKey(KEY_ALIAS, null) as? SecretKey
-        if (existing != null) return existing
+        if (existing != null) {
+            cachedKey = existing
+            return existing
+        }
 
         val keyGenerator = KeyGenerator.getInstance(
             KeyProperties.KEY_ALGORITHM_AES,
@@ -42,7 +53,7 @@ object KeystoreCrypto {
             .setKeySize(256)
             .build()
         keyGenerator.init(spec)
-        return keyGenerator.generateKey()
+        return keyGenerator.generateKey().also { cachedKey = it }
     }
 
     fun encrypt(plaintext: String): String {
